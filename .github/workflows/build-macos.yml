@@ -162,6 +162,25 @@ jobs:
           test -d "dist/$APP_NAME.app" || { echo "FAIL: dist/$APP_NAME.app ساخته نشد."; exit 1; }
           echo "OK: dist/$APP_NAME.app"
 
+      - name: Add microphone usage description (Info.plist)
+        # (2.0.81-beta) قابلیت «صحبت با دوربین» از میکروفون استفاده می‌کند؛
+        # بدون NSMicrophoneUsageDescription، مک اجازه‌ی دسترسی نمی‌دهد.
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import os, plistlib
+          app = os.environ["APP_NAME"]
+          p = f"dist/{app}.app/Contents/Info.plist"
+          with open(p, "rb") as f:
+              d = plistlib.load(f)
+          d["NSMicrophoneUsageDescription"] = (
+              "برای قابلیت «صحبت با دوربین» (پخش صدای شما از بلندگوی دوربین) "
+              "از میکروفون استفاده می‌شود.")
+          with open(p, "wb") as f:
+              plistlib.dump(d, f)
+          print("NSMicrophoneUsageDescription added to", p)
+          EOF
+
       - name: Place updater-convention files at bundle root
         # قرارداد آپدیتر: get_install_dir روی مک = ریشه‌ی باندل .app؛ پس
         # version.txt و CHANGELOG_FA.md باید کنار Contents باشند تا
