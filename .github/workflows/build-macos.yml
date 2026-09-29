@@ -4,7 +4,7 @@
 # خروجی‌ها:
 #   - IAS Viewer.app  (باندل PyInstaller، حالت windowed/onedir)
 #   - IAS-Viewer-MAC-Update-vX.Y.Z.zip  (فایل آپدیت تفاضلی برای آپدیتر داخل برنامه)
-#   - IAS-Viewer-macOS-vX.Y.Z.dmg  (بسته‌ی نصب)
+#   - IAS-Viewer-MAC-vX.Y.Z.dmg  (بسته‌ی نصب)
 #
 # انتشار در GitHub Release فقط با اجرای دستی ورک‌فلو + تیک publish_release؛
 # تگ ریلیز مک «mac-vX.Y.Z-beta» است تا با ریلیزهای ویندوز (vX.Y.Z-beta) قاطی نشود.
@@ -176,7 +176,7 @@ jobs:
           set -euo pipefail
           # DMG ساده: باندل .app داخلش؛ کاربر درگ می‌کند به Applications
           hdiutil create -volname "IAS Viewer" -srcfolder "dist/$APP_NAME.app" \
-            -ov -format UDZO "dist/IAS-Viewer-macOS-v$APP_VERSION.dmg"
+            -ov -format UDZO "dist/IAS-Viewer-MAC-v$APP_VERSION.dmg"
           ls -la dist/*.dmg
 
       - name: Smoke test (offscreen import)
@@ -231,7 +231,7 @@ jobs:
           tag="mac-v$ver"
           zip=(dist/IAS-Viewer-MAC-Update-v"$ver".zip)
           test -f "${zip[0]}" || { echo "FAIL: update zip not found"; exit 1; }
-          dmg=(dist/IAS-Viewer-macOS-v"$ver".dmg)
+          dmg=(dist/IAS-Viewer-MAC-v"$ver".dmg)
           notes="IAS Viewer $ver — نسخه‌ی مک (macOS)."
           m="$(grep -m1 -F "**نسخه‌ی $ver" README.md || true)"
           if [ -n "$m" ]; then notes="$m"; fi

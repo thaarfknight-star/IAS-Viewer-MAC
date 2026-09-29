@@ -4,12 +4,12 @@
 > [IAS-CMS](https://github.com/thaarfknight-star/IAS-CMS) نسخه‌ی ویندوز).
 > تفاوت‌ها در ماژول `platform_compat.py` متمرکز شده‌اند.
 
-**نسخه‌ی فعلی: 2.0.77-beta**
+**نسخه‌ی فعلی: 2.0.79-beta**
 
 ## نصب روی مک
 
 1. از صفحه‌ی [Releases](https://github.com/thaarfknight-star/IAS-Viewer-MAC/releases)
-   فایل `IAS-Viewer-macOS-vX.Y.Z.dmg` را دانلود کنید.
+   فایل `IAS-Viewer-MAC-vX.Y.Z.dmg` را دانلود کنید.
 2. DMG را باز کنید و **IAS Viewer** را به پوشه‌ی Applications بکشید.
 3. **اولین اجرا:** چون برنامه امضای توسعه‌دهنده‌ی اپل ندارد، مک در نگاه اول
    اجازه‌ی اجرا نمی‌دهد — روی IAS Viewer **راست‌کلیک ← Open** کنید و تأیید کنید.
@@ -340,7 +340,7 @@ GitHub Actions ساخته می‌شود و روی سیستم مقصد نیازی
     الگویی که برای yolov8n.pt استفاده شده (رجوع کنید به
     `.github/workflows/build.yml`).
 
-## تغییرات نسخه‌های اخیر (2.0.69 تا 2.0.78)
+## تغییرات نسخه‌های اخیر (2.0.69 تا 2.0.79)
 
 17. **نسخه‌ی 2.0.69-beta — شناسایی PTZ در دوربین‌های لنز موتورایزد بدون سرویس
     PTZ** — باگ واقعی پیدا و رفع شد (`ptz_control.py`): بررسی Imaging (فوکوس)
@@ -443,6 +443,12 @@ GitHub Actions ساخته می‌شود و روی سیستم مقصد نیازی
     موتورسیکلت» دیگر حرف نمی‌گیرد و ردیف پایین ۵ رقم می‌گیرد
     (`plate_library_dialog.py`؛ `validate_motorcycle_plate` در
     `plate_store.py`). تست‌های `tests/test_265_beta.py`.
+
+27. **نسخه‌ی 2.0.79-beta — خوانش دوردیفه‌ی پلاک موتورسیکلت** — مدل OCR
+    تک‌سطری است و کراپ مربعی پلاک موتور را له می‌کرد؛ حالا کراپ‌های
+    مربعی‌شکل از وسط نصف و هر ردیف جدا خوانده می‌شود (۳ رقم بالا + ۵ رقم
+    پایین) (`PlateOCR._read_hezar_tworow` در `plate_detector.py`). تست‌های
+    `tests/test_266_beta.py`.
 
 ## راهنمای اجرای محلی:
 ```bash
