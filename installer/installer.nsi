@@ -1,0 +1,694 @@
+﻿; ============================================================
+; نصب‌کننده‌ی «IAS Viewer» (IAS-CMS)
+; رابط نصب: صفحات استاندارد ویزارد ویندوز (MUI2):
+;   خوش‌آمد → انتخاب پوشه → نصب (نوار پیشرفت) → پایان
+; رابط حذف‌کننده‌ی مستقل: تک‌صفحه‌ی اختصاصی با دکمه‌ی قرمز حذف کامل
+; کامپایل (روی Windows runner):
+;   makensis /DVERSION=2.0.0 installer/installer.nsi
+; ============================================================
+Unicode True
+RequestExecutionLevel user
+XPStyle on
+
+!include "LogicLib.nsh"
+!include "nsDialogs.nsh"
+!include "StrFunc.nsh"
+!include "FileFunc.nsh"
+${StrStr}
+
+; ---------- defines ----------
+!define APP_NAME "IAS Viewer"
+!define APP_EN "IAS-CMS"
+!define EXE_NAME "CCTV_CMS.exe"
+!define PUBLISHER "ایمن آرا سورنا"
+
+!ifndef VERSION
+  !define VERSION "2.0.0"
+!endif
+!ifndef DISTDIR
+  !define DISTDIR "dist"
+!endif
+!ifndef GFXDIR
+  !define GFXDIR "installer/graphics"
+!endif
+!ifndef OUTDIR
+  !define OUTDIR "dist"
+!endif
+!ifndef ROOTDIR
+  !define ROOTDIR "."
+!endif
+
+Name "${APP_NAME} v${VERSION}"
+; (Caption داخل بلوک UNINSTALLER_ONLY / حالت عادی تنظیم می‌شود)
+!ifdef UNINSTALLER_ONLY
+  ; --- حالت حذف‌کننده‌ی مستقل: فقط پاک‌سازی کامل، بدون صفحه‌ی نصب ---
+  OutFile "${OUTDIR}\IAS-CMS-Uninstall-v${VERSION}.exe"
+  Caption "حذف کامل ${APP_NAME} نسخه‌ی ${VERSION}"
+  ; makensis بدون حتی یک سکشن خالی، اسکریپت را «نامعتبر» می‌داند —
+  ; این سکشن هرگز اجرا نمی‌شود چون .onInit اول Quit می‌کند
+  Section "-hidden-uninstaller"
+  SectionEnd
+!else
+  OutFile "${OUTDIR}\IAS-CMS-Setup-v${VERSION}.exe"
+  Caption "نصب ${APP_NAME} نسخه‌ی ${VERSION}"
+!endif
+Icon "${ROOTDIR}\assets\app.ico"
+InstallDir "$LOCALAPPDATA\ImenaraSorena\IAS-CMS"
+; خواندن محل واقعی نصب از رجیستری — اگر کاربر پوشه را عوض کرده باشد،
+; حذف‌کننده همان مسیر واقعی را پیدا می‌کند (نه مسیر پیش‌فرض)
+InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" "InstallLocation"
+ShowInstDetails nevershow
+
+; ---------- متغیرها (مشترک بین نصب‌کننده و حذف‌کننده) ----------
+Var Dialog
+Var BgCtl
+Var BgBmp
+Var BgFile
+Var BtnNext
+Var BtnBack
+Var BtnCancel
+Var BtnBrowse
+Var DirEdit
+Var ProgressBar
+Var StatusLabel
+Var RunCheck
+Var Ctl0
+Var Ctl1
+Var Ctl2
+Var Ctl3
+Var Ctl4
+Var Ctl5
+Var Ctl6
+Var Ctl7
+Var Ctl8
+Var Ctl9
+Var FontReg
+Var FontBold
+
+; ============================================================
+; ابزارهای پایه‌ی UI (ورودی‌ها با Push، خروجی با Pop — متوازن)
+; (مورد استفاده‌ی حذف‌کننده‌ی مستقل)
+; ============================================================
+Function SetClientSize
+  ; Push w, Push h → ناحیه‌ی مشتری پنجره دقیقاً w×h پیکسل می‌شود
+  ; (ترتیب Pop برعکس Push است: آخرین مقدار روی استک، همان h است)
+  Pop $R1 ; h
+  Pop $R0 ; w
+  System::Call 'user32::GetWindowRect(i $HWNDPARENT, @r9)'
+  System::Call '*$9(i.r2, i.r3, i.r4, i.r5)'
+  IntOp $R2 $R4 - $R2   ; outer w
+  IntOp $R3 $R5 - $R3   ; outer h
+  System::Call 'user32::GetClientRect(i $HWNDPARENT, @r9)'
+  System::Call '*$9(i.r2, i.r3, i.r4, i.r5)'
+  IntOp $R4 $R4 - $R2   ; client w
+  IntOp $R5 $R5 - $R3   ; client h
+  IntOp $R2 $R2 - $R4
+  IntOp $R2 $R2 + $R0   ; outer w جدید
+  IntOp $R3 $R3 - $R5
+  IntOp $R3 $R3 + $R1   ; outer h جدید
+  System::Call 'user32::GetSystemMetrics(i 0) i.s'
+  Pop $R4
+  System::Call 'user32::GetSystemMetrics(i 1) i.s'
+  Pop $R5
+  IntOp $R4 $R4 - $R2
+  IntOp $R4 $R4 / 2
+  IntOp $R5 $R5 - $R3
+  IntOp $R5 $R5 / 2
+  System::Call 'user32::SetWindowPos(i $HWNDPARENT, i 0, i $R4, i $R5, i $R2, i $R3, i 0x14)'
+FunctionEnd
+
+Function HideWizardButtons
+  GetDlgItem $R0 $HWNDPARENT 1
+  System::Call 'user32::ShowWindow(i $R0, i ${SW_HIDE})'
+  GetDlgItem $R0 $HWNDPARENT 2
+  System::Call 'user32::ShowWindow(i $R0, i ${SW_HIDE})'
+  GetDlgItem $R0 $HWNDPARENT 3
+  System::Call 'user32::ShowWindow(i $R0, i ${SW_HIDE})'
+FunctionEnd
+
+Function TrackCtl
+  Pop $R0 ; hwnd
+  ${If} $Ctl0 == 0
+    StrCpy $Ctl0 $R0
+  ${ElseIf} $Ctl1 == 0
+    StrCpy $Ctl1 $R0
+  ${ElseIf} $Ctl2 == 0
+    StrCpy $Ctl2 $R0
+  ${ElseIf} $Ctl3 == 0
+    StrCpy $Ctl3 $R0
+  ${ElseIf} $Ctl4 == 0
+    StrCpy $Ctl4 $R0
+  ${ElseIf} $Ctl5 == 0
+    StrCpy $Ctl5 $R0
+  ${ElseIf} $Ctl6 == 0
+    StrCpy $Ctl6 $R0
+  ${ElseIf} $Ctl7 == 0
+    StrCpy $Ctl7 $R0
+  ${ElseIf} $Ctl8 == 0
+    StrCpy $Ctl8 $R0
+  ${ElseIf} $Ctl9 == 0
+    StrCpy $Ctl9 $R0
+  ${EndIf}
+FunctionEnd
+
+Function DestroyOneCtl
+  Pop $R0 ; hwnd
+  ${If} $R0 != 0
+    System::Call 'user32::DestroyWindow(i $R0)'
+  ${EndIf}
+FunctionEnd
+
+Function ClearScreen
+  Push $Ctl0
+  Call DestroyOneCtl
+  Push $Ctl1
+  Call DestroyOneCtl
+  Push $Ctl2
+  Call DestroyOneCtl
+  Push $Ctl3
+  Call DestroyOneCtl
+  Push $Ctl4
+  Call DestroyOneCtl
+  Push $Ctl5
+  Call DestroyOneCtl
+  Push $Ctl6
+  Call DestroyOneCtl
+  Push $Ctl7
+  Call DestroyOneCtl
+  Push $Ctl8
+  Call DestroyOneCtl
+  Push $Ctl9
+  Call DestroyOneCtl
+  StrCpy $Ctl0 0
+  StrCpy $Ctl1 0
+  StrCpy $Ctl2 0
+  StrCpy $Ctl3 0
+  StrCpy $Ctl4 0
+  StrCpy $Ctl5 0
+  StrCpy $Ctl6 0
+  StrCpy $Ctl7 0
+  StrCpy $Ctl8 0
+  StrCpy $Ctl9 0
+  ${If} $BgBmp != 0
+    System::Call 'gdi32::DeleteObject(i $BgBmp)'
+    StrCpy $BgBmp 0
+  ${EndIf}
+FunctionEnd
+
+Function PlaceCtl
+  ; Push hwnd, x, y, w, h (پیکسل)
+  Pop $R0 ; h
+  Pop $R1 ; w
+  Pop $R2 ; y
+  Pop $R3 ; x
+  Pop $R4 ; hwnd
+  System::Call 'user32::SetWindowPos(i $R4, i 0, i $R3, i $R2, i $R1, i $R0, i 0x16)'
+FunctionEnd
+
+Function PlaceCtlBottom
+  ; Push hwnd, x, w, h → کنترل همیشه چسبیده به پایین صفحه (۱۴ پیکسل
+  ; حاشیه از لبه‌ی پایین ناحیه‌ی مشتری دیالوگ) - به‌جای مختصات ثابت، چون
+  ; ارتفاع واقعی پنجره روی سیستم‌های مختلف ممکن است با ۶۰۰ طراحی فرق کند.
+  Pop $R6 ; h
+  Pop $R7 ; w
+  Pop $R8 ; x
+  Pop $R9 ; hwnd
+  System::Call 'user32::GetClientRect(i $Dialog, @r9)'
+  System::Call '*$9(i.r2, i.r3, i.r4, i.r5)'
+  IntOp $R5 $R5 - $R3   ; ارتفاع ناحیه‌ی مشتری
+  IntOp $R5 $R5 - $R6   ; منهای ارتفاع کنترل
+  IntOp $R5 $R5 - 14    ; حاشیه‌ی پایین
+  Push $R9
+  Push $R8
+  Push $R5
+  Push $R7
+  Push $R6
+  Call PlaceCtl
+FunctionEnd
+
+Function ShowBackground
+  ; ورودی: نام فایل BMP روی استک (مثلاً "bg_uninstall.bmp").
+  ; نکته: اسم فایل در $BgFile (متغیر اختصاصی) نگه داشته می‌شود، چون
+  ; TrackCtl و PlaceCtl رجیسترهای $R0 تا $R4 را بازنویسی می‌کنند.
+  Pop $BgFile
+  nsDialogs::CreateControl "STATIC" "${SS_BITMAP}|${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 ""
+  Pop $BgCtl
+  Push $BgCtl
+  Call TrackCtl
+  Push $BgCtl
+  Push 0
+  Push 0
+  Push 960
+  Push 600
+  Call PlaceCtl
+  System::Call 'user32::LoadImage(i 0, t "$PLUGINSDIR\$BgFile", i ${IMAGE_BITMAP}, i 0, i 0, i ${LR_LOADFROMFILE}) i.s'
+  Pop $BgBmp
+  SendMessage $BgCtl ${STM_SETIMAGE} ${IMAGE_BITMAP} $BgBmp
+  ; نوار فوتر در پایینِ واقعی صفحه (زیر دکمه‌ها) - با همان رنگ‌های تصویر
+  ; (#0D1216 با خط طلایی #D4AF37). اگر ارتفاع مشتری دقیقاً ۶۰۰ باشد، دقیقاً
+  ; روی نوارِ داخل تصویر می‌نشیند؛ وگرنه پایینِ واقعی را پوشش می‌دهد.
+  System::Call 'user32::GetClientRect(i $Dialog, @r9)'
+  System::Call '*$9(i.r2, i.r3, i.r4, i.r5)'
+  IntOp $R6 $R4 - $R2   ; عرض مشتری
+  IntOp $R7 $R5 - $R3   ; ارتفاع مشتری
+  IntOp $R7 $R7 - 60    ; y بالای نوار فوتر
+  IntOp $R8 $R7 + 2     ; y بدنه‌ی فوتر (زیر خط طلایی)
+  nsDialogs::CreateControl "STATIC" "${SS_LEFT}|${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 ""
+  Pop $R0
+  Push $R0
+  Call TrackCtl
+  SetCtlColors $R0 "D4AF37" "D4AF37"
+  Push $R0
+  Push 0
+  Push $R7
+  Push $R6
+  Push 2
+  Call PlaceCtl
+  nsDialogs::CreateControl "STATIC" "${SS_LEFT}|${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 ""
+  Pop $R0
+  Push $R0
+  Call TrackCtl
+  SetCtlColors $R0 "0D1216" "0D1216"
+  Push $R0
+  Push 0
+  Push $R8
+  Push $R6
+  Push 58
+  Call PlaceCtl
+FunctionEnd
+
+Function MakeButton
+  ; Push "متن" → دکمه‌ی اصلی (آبی تخت)؛ هندل روی استک برمی‌گردد
+  Pop $R0
+  nsDialogs::CreateControl "BUTTON" "${BS_PUSHBUTTON}|${BS_FLAT}|${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 "$R0"
+  Pop $R1
+  Push $R1
+  Call TrackCtl
+  SetCtlColors $R1 "FFFFFF" "0F7CC1"
+  Push $R1
+  Call ApplyFontBold
+  Push $R1
+FunctionEnd
+
+Function MakeGhostButton
+  ; Push "متن" → دکمه‌ی ثانویه (تیره)
+  Pop $R0
+  nsDialogs::CreateControl "BUTTON" "${BS_PUSHBUTTON}|${BS_FLAT}|${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 "$R0"
+  Pop $R1
+  Push $R1
+  Call TrackCtl
+  SetCtlColors $R1 "E9EEF1" "242E34"
+  Push $R1
+  Call ApplyFontBold
+  Push $R1
+FunctionEnd
+
+Function MakeRedButton
+  ; Push "متن" → دکمه‌ی خطر (قرمز تخت) برای حذف کامل
+  Pop $R0
+  nsDialogs::CreateControl "BUTTON" "${BS_PUSHBUTTON}|${BS_FLAT}|${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 "$R0"
+  Pop $R1
+  Push $R1
+  Call TrackCtl
+  SetCtlColors $R1 "FFFFFF" "A03030"
+  Push $R1
+  Call ApplyFontBold
+  Push $R1
+FunctionEnd
+
+; ============================================================
+; فونت واحد (وزیرمتن) — بدون نصب روی سیستم، فقط در حافظه‌ی پردازه
+; (مورد استفاده‌ی حذف‌کننده‌ی مستقل)
+; ============================================================
+Function LoadAppFonts
+  File /oname=$PLUGINSDIR\VazirReg.ttf "${GFXDIR}\Vazirmatn-Regular.ttf"
+  File /oname=$PLUGINSDIR\VazirBold.ttf "${GFXDIR}\Vazirmatn-Bold.ttf"
+  System::Call 'gdi32::AddFontResourceW(w "$PLUGINSDIR\VazirReg.ttf") i.s'
+  Pop $R0
+  System::Call 'gdi32::AddFontResourceW(w "$PLUGINSDIR\VazirBold.ttf") i.s'
+  Pop $R0
+  System::Call 'gdi32::CreateFont(i -16, i 0, i 0, i 0, i 400, i 0, i 0, i 0, i 1, i 0, i 0, i 0, i 0, t "Vazirmatn") i.s'
+  Pop $FontReg
+  System::Call 'gdi32::CreateFont(i -16, i 0, i 0, i 0, i 700, i 0, i 0, i 0, i 1, i 0, i 0, i 0, i 0, t "Vazirmatn") i.s'
+  Pop $FontBold
+FunctionEnd
+
+Function ApplyFontReg
+  ; Push hwnd → فونت معمولی وزیرمتن
+  Pop $R0
+  ${If} $FontReg != 0
+    SendMessage $R0 ${WM_SETFONT} $FontReg 1
+  ${EndIf}
+FunctionEnd
+
+Function ApplyFontBold
+  ; Push hwnd → فونت ضخیم وزیرمتن
+  Pop $R0
+  ${If} $FontBold != 0
+    SendMessage $R0 ${WM_SETFONT} $FontBold 1
+  ${EndIf}
+FunctionEnd
+
+Function CheckAppRunning
+  ; خروجی در $R0: ۱ اگر برنامه در حال اجراست
+  nsExec::ExecToStack '"$SYSDIR\tasklist.exe" /FI "IMAGENAME eq ${EXE_NAME}" /FO CSV /NH'
+  Pop $R1
+  Pop $R2
+  ${StrStr} $R0 $R2 "${EXE_NAME}"
+  ${If} $R0 == ""
+    StrCpy $R0 0
+  ${Else}
+    StrCpy $R0 1
+  ${EndIf}
+FunctionEnd
+
+; ============================================================
+; نصب‌کننده — صفحات استاندارد ویزارد ویندوز (MUI2)
+; خوش‌آمد → انتخاب پوشه → نصب → پایان
+; ============================================================
+!ifndef UNINSTALLER_ONLY
+!include "MUI2.nsh"
+
+; (2.0.38-beta) لوگوی برنامه روی صفحه‌ی خوش‌آمد و هدر صفحات —
+; جایگزین تصویر پیش‌فرض NSIS (تولیدشده توسط make_graphics.py).
+!define MUI_WELCOMEFINISHPAGE_BITMAP "${GFXDIR}\welcome_logo.bmp"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_BITMAP "${GFXDIR}\header_logo.bmp"
+
+; --- صفحه‌ی خوش‌آمد (استاندارد) ---
+!insertmacro MUI_PAGE_WELCOME
+
+; --- صفحه‌ی انتخاب پوشه (استاندارد) + بررسی «برنامه باز است؟» ---
+Function DirLeave
+  CheckLoop:
+    Call CheckAppRunning
+    ${If} $R0 == 1
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
+        "$(APP_RUNNING_MSG)" \
+        IDRETRY CheckLoop
+      Abort
+    ${EndIf}
+FunctionEnd
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE DirLeave
+!insertmacro MUI_PAGE_DIRECTORY
+
+; --- صفحه‌ی نصب (نوار پیشرفت استاندارد) ---
+!insertmacro MUI_PAGE_INSTFILES
+
+; --- صفحه‌ی پایان (استاندارد) + تیک «اجرای برنامه» ---
+!define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE_NAME}"
+!define MUI_FINISHPAGE_RUN_TEXT "$(RUN_TEXT)"
+!insertmacro MUI_PAGE_FINISH
+
+; (2.0.42-beta به دستور کاربر) نصب‌کننده فقط فارسی است؛ انتخاب زبان حذف شد.
+!insertmacro MUI_LANGUAGE "Farsi"
+
+; نکته‌ی NSIS: ثابت‌های ${LANG_xxx} فقط بعد از !insertmacro MUI_LANGUAGE
+; همان زبان تعریف می‌شوند؛ پس LangStringهای سفارشی حتماً باید بعد از
+; زبان‌ها بیایند، وگرنه به زبان اشتباه می‌چسبند.
+LangString SEC_INSTALL ${LANG_Farsi} "نصب"
+LangString RUN_TEXT ${LANG_Farsi} "اجرای ${APP_NAME}"
+LangString APP_RUNNING_MSG ${LANG_Farsi} "برنامه‌ی ${APP_NAME} در حال اجراست.$\nلطفاً آن را ببندید و «تلاش مجدد» را بزنید."
+LangString UNINSTALL_CONFIRM ${LANG_Farsi} "«${APP_NAME}» به‌طور کامل از سیستم حذف شود؟$\n$\nهمه‌ی فایل‌ها، تنظیمات، دوربین‌ها، بانک چهره و سوابق پلاک‌ها برای همیشه پاک می‌شوند."
+
+Function .onInit
+FunctionEnd
+
+; --- سکشن نصب واقعی (کپی فایل‌ها + میان‌برها + رجیستری) ---
+Section "$(SEC_INSTALL)"
+  SetOutPath "$INSTDIR"
+  ; کپی فایل‌ها (chunkبندی‌شده با نوار پیشرفت واقعی — تولیدشده توسط gen_filelist.py)
+  !include "${ROOTDIR}\installer\files.nsi"
+
+  CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
+    "$INSTDIR\${EXE_NAME}" "" "$INSTDIR\${EXE_NAME}" 0
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\حذف برنامه.lnk" "$INSTDIR\uninstall.exe"
+  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" \
+    "$INSTDIR\${EXE_NAME}" "" "$INSTDIR\${EXE_NAME}" 0
+  WriteUninstaller "$INSTDIR\uninstall.exe"
+  ; اطلاعات حذف در رجیستری کاربر جاری (بدون نیاز به ادمین)
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" \
+    "DisplayName" "${APP_NAME} (${APP_EN})"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" \
+    "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" \
+    "Publisher" "${PUBLISHER}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" \
+    "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" \
+    "DisplayIcon" "$INSTDIR\${EXE_NAME}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" \
+    "UninstallString" '"$INSTDIR\uninstall.exe"'
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" "NoModify" 1
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" "NoRepair" 1
+  ; ثبت حجم نصب (به کیلوبایت) تا در Settings و Control Panel نمایش داده شود (2.0.25-beta)
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" "EstimatedSize" $0
+SectionEnd
+!endif
+
+; ============================================================
+; حذف کامل (Complete Uninstall) — بعد از اجرا هیچ اثری از برنامه
+; روی سیستم نمی‌ماند:
+;   ۱) بستن اجباری برنامه‌ی در حال اجرا (وگرنه فایل‌ها قفل می‌مانند)
+;   ۲) حذف میان‌برهای منوی استارت و دسکتاپ
+;   ۳) حذف کل پوشه‌ی نصب: فایل‌ها + person_data + plate_data +
+;      cameras.json + آپدیتر + version.txt + خود uninstall.exe
+;   ۴) حذف کلیدهای رجیستری (ورودی Uninstall + تنظیمات)
+;   ۵) حذف پوشه‌های داده‌ی خارج از محل نصب (AppData و plate_data کاربر)
+;   ۶) حذف فایل‌های موقت
+; این بدنه هم در uninstall.exe داخل پوشه‌ی نصب (WriteUninstaller) و هم
+; در حذف‌کننده‌ی مستقل (UNINSTALLER_ONLY) استفاده می‌شود.
+; ============================================================
+!macro FULL_CLEANUP_BODY
+  nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /F /IM "${EXE_NAME}"'
+  Pop $0
+  Pop $1
+  Sleep 1000
+  Delete "$SMPROGRAMS\${APP_NAME}\*.lnk"
+  RMDir "$SMPROGRAMS\${APP_NAME}"
+  Delete "$DESKTOP\${APP_NAME}.lnk"
+  RMDir /r "$INSTDIR"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}"
+  DeleteRegKey HKCU "Software\${APP_EN}"
+  DeleteRegKey HKCU "Software\ImenaraSorena"
+  RMDir /r "$APPDATA\ImenaraSorena"
+  RMDir /r "$LOCALAPPDATA\ImenaraSorena"
+  IfFileExists "$PROFILE\plate_data\plates.db" 0 +2
+    RMDir /r "$PROFILE\plate_data"
+  Delete "$TEMP\${APP_EN}*.*"
+!macroend
+
+!ifndef UNINSTALLER_ONLY
+Function un.onInit
+  MessageBox MB_YESNO|MB_ICONQUESTION \
+    "$(UNINSTALL_CONFIRM)" \
+    IDYES NoAbort
+    Abort
+  NoAbort:
+FunctionEnd
+
+Section "Uninstall"
+  !insertmacro FULL_CLEANUP_BODY
+SectionEnd
+
+UninstPage instfiles
+!endif
+
+; ============================================================
+; حذف‌کننده‌ی مستقل — داخل پکیج setup قرار می‌گیرد تا حتی اگر
+; uninstall.exe داخل پوشه‌ی نصب گم شده باشد، حذف کامل ممکن باشد.
+; رابط: منوی موارد حذفی → پیشرفت واقعی → پایان (هم‌فونت و هم‌تم با نصب‌کننده)
+; کامپایل: makensis /DVERSION=2.0.0 /DUNINSTALLER_ONLY installer/installer.nsi
+; ============================================================
+!ifdef UNINSTALLER_ONLY
+
+Function ShowUninstMenu
+  Push "bg_uninstall.bmp"
+  Call ShowBackground
+  ; مسیر نصب شناسایی‌شده
+  nsDialogs::CreateControl "STATIC" "${SS_LEFT}|${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 ""
+  Pop $StatusLabel
+  Push $StatusLabel
+  Call TrackCtl
+  SetCtlColors $StatusLabel "9BA79B" "141B20"
+  Push $StatusLabel
+  Call ApplyFontReg
+  Push $StatusLabel
+  Push 210
+  Push 436
+  Push 470
+  Push 32
+  Call PlaceCtl
+  IfFileExists "$INSTDIR\${EXE_NAME}" 0 +3
+    ${NSD_SetText} $StatusLabel "محل نصب: $INSTDIR"
+    Goto MenuBtns
+  ${NSD_SetText} $StatusLabel "فایل اصلی یافت نشد؛ فقط بقایا پاک‌سازی می‌شود."
+  MenuBtns:
+  Push "حذف کامل"
+  Call MakeRedButton
+  Pop $BtnNext
+  Push $BtnNext
+  Push 700
+  Push 220
+  Push 40
+  Call PlaceCtlBottom
+  ${NSD_OnClick} $BtnNext OnUninstStart
+  Push "انصراف"
+  Call MakeGhostButton
+  Pop $BtnCancel
+  Push $BtnCancel
+  Push 40
+  Push 150
+  Push 40
+  Call PlaceCtlBottom
+  ${NSD_OnClick} $BtnCancel OnUninstCancel
+FunctionEnd
+
+Function ShowUninstDoing
+  Push "bg_uninstall_progress.bmp"
+  Call ShowBackground
+  nsDialogs::CreateControl "msctls_progress32" "${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 ""
+  Pop $ProgressBar
+  Push $ProgressBar
+  Call TrackCtl
+  Push $ProgressBar
+  Push 80
+  Push 308
+  Push 800
+  Push 28
+  Call PlaceCtl
+  SendMessage $ProgressBar ${PBM_SETRANGE} 0 0x640000
+  SendMessage $ProgressBar ${PBM_SETBARCOLOR} 0 0x4646C1
+  nsDialogs::CreateControl "STATIC" "${SS_LEFT}|${WS_CHILD}|${WS_VISIBLE}" 0 0 0 10 10 "در حال حذف…"
+  Pop $StatusLabel
+  Push $StatusLabel
+  Call TrackCtl
+  SetCtlColors $StatusLabel "E9EEF1" "141B20"
+  Push $StatusLabel
+  Call ApplyFontReg
+  Push $StatusLabel
+  Push 80
+  Push 366
+  Push 800
+  Push 28
+  Call PlaceCtl
+FunctionEnd
+
+Function UninstStep
+  ; Push "متن وضعیت"، Push درصد → به‌روزرسانی نوار + لیبل با نقاشی فوری
+  Pop $R0 ; pct
+  Pop $R1 ; text
+  SendMessage $ProgressBar ${PBM_SETPOS} $R0 0
+  System::Call 'user32::RedrawWindow(i $ProgressBar, i 0, i 0, i 0x181)'
+  ${NSD_SetText} $StatusLabel $R1
+  System::Call 'user32::RedrawWindow(i $StatusLabel, i 0, i 0, i 0x181)'
+FunctionEnd
+
+Function OnUninstStart
+  Call ClearScreen
+  Call ShowUninstDoing
+  System::Call 'user32::UpdateWindow(i $Dialog)'
+  ; پاک‌سازی مرحله‌به‌مرحله با نوار پیشرفت واقعی (مثل FULL_CLEANUP_BODY)
+  Push "در حال بستن برنامه…"
+  Push 8
+  Call UninstStep
+  nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /F /IM "${EXE_NAME}"'
+  Pop $0
+  Pop $1
+  Sleep 800
+  Push "در حال حذف میان‌برها…"
+  Push 22
+  Call UninstStep
+  Delete "$SMPROGRAMS\${APP_NAME}\*.lnk"
+  RMDir "$SMPROGRAMS\${APP_NAME}"
+  Delete "$DESKTOP\${APP_NAME}.lnk"
+  Push "در حال حذف فایل‌های برنامه…"
+  Push 45
+  Call UninstStep
+  RMDir /r "$INSTDIR"
+  Push "در حال پاک‌سازی رجیستری…"
+  Push 65
+  Call UninstStep
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}"
+  DeleteRegKey HKCU "Software\${APP_EN}"
+  DeleteRegKey HKCU "Software\ImenaraSorena"
+  Push "در حال حذف داده‌های کاربر…"
+  Push 85
+  Call UninstStep
+  RMDir /r "$APPDATA\ImenaraSorena"
+  RMDir /r "$LOCALAPPDATA\ImenaraSorena"
+  IfFileExists "$PROFILE\plate_data\plates.db" 0 +2
+    RMDir /r "$PROFILE\plate_data"
+  Push "در حال حذف فایل‌های موقت…"
+  Push 96
+  Call UninstStep
+  Delete "$TEMP\${APP_EN}*.*"
+  Push "تمام شد."
+  Push 100
+  Call UninstStep
+  Sleep 400
+  Call ClearScreen
+  Call ShowUninstDone
+  System::Call 'user32::UpdateWindow(i $Dialog)'
+FunctionEnd
+
+Function ShowUninstDone
+  Push "bg_uninstall_finish.bmp"
+  Call ShowBackground
+  Push "بستن"
+  Call MakeGhostButton
+  Pop $BtnNext
+  Push $BtnNext
+  Push 700
+  Push 220
+  Push 40
+  Call PlaceCtlBottom
+  ${NSD_OnClick} $BtnNext OnUninstCancel
+FunctionEnd
+
+Function OnUninstCancel
+  Quit
+FunctionEnd
+
+Function ShowUninstMain
+  Call HideWizardButtons
+  Push 960
+  Push 600
+  Call SetClientSize
+  nsDialogs::Create 1018
+  Pop $Dialog
+  ${If} $Dialog == error
+    Abort
+  ${EndIf}
+  System::Call 'user32::SetWindowPos(i $Dialog, i 0, i 0, i 0, i 960, i 600, i 0x16)'
+  StrCpy $Ctl0 0
+  StrCpy $Ctl1 0
+  StrCpy $Ctl2 0
+  StrCpy $Ctl3 0
+  StrCpy $Ctl4 0
+  StrCpy $Ctl5 0
+  StrCpy $Ctl6 0
+  StrCpy $Ctl7 0
+  StrCpy $Ctl8 0
+  StrCpy $Ctl9 0
+  StrCpy $BgBmp 0
+  Call ShowUninstMenu
+  nsDialogs::Show
+FunctionEnd
+
+Page custom ShowUninstMain
+
+Function .onInit
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_EN}" "InstallLocation"
+  ${If} $0 != ""
+    StrCpy $INSTDIR $0
+  ${EndIf}
+  InitPluginsDir
+  File /oname=$PLUGINSDIR\bg_uninstall.bmp "${GFXDIR}\bg_uninstall.bmp"
+  File /oname=$PLUGINSDIR\bg_uninstall_progress.bmp "${GFXDIR}\bg_uninstall_progress.bmp"
+  File /oname=$PLUGINSDIR\bg_uninstall_finish.bmp "${GFXDIR}\bg_uninstall_finish.bmp"
+  Call LoadAppFonts
+FunctionEnd
+!endif

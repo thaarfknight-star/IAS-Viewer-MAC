@@ -1,0 +1,250 @@
+# -*- coding: utf-8 -*-
+# ورک‌فلو بیلد نسخه‌ی مک IAS Viewer (IAS-Viewer-MAC).
+#
+# خروجی‌ها:
+#   - IAS Viewer.app  (باندل PyInstaller، حالت windowed/onedir)
+#   - IAS-Viewer-MAC-Update-vX.Y.Z.zip  (فایل آپدیت تفاضلی برای آپدیتر داخل برنامه)
+#   - IAS-Viewer-macOS-vX.Y.Z.dmg  (بسته‌ی نصب)
+#
+# انتشار در GitHub Release فقط با اجرای دستی ورک‌فلو + تیک publish_release؛
+# تگ ریلیز مک «mac-vX.Y.Z-beta» است تا با ریلیزهای ویندوز (vX.Y.Z-beta) قاطی نشود.
+#
+# نکته‌ی Gatekeeper: باندل امضا نشده است (بدون حساب دولوپر اپل)؛ کاربر در اولین
+# اجرا باید راست‌کلیک ← Open کند. این محدودیت اپل است، نه باگ بیلد.
+
+name: Build macOS App
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'انتشار فایل آپدیت در GitHub Release (تگ mac-vX.Y.Z)'
+        type: boolean
+        default: false
+
+env:
+  APP_NAME: IAS Viewer
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Read version
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="$(tr -d '\r\n ' < version.txt)"
+          echo "APP_VERSION=$ver" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$ver"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Prepare plate-reader assets (model + OCR models)
+        # مثل ویندوز: مدل‌ها باید حتماً داخل باندل باشند تا روی سیستم کاربر
+        # هیچ دانلودی لازم نباشد. نبود/ناقص بودن → بیلد fail.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ci/prepare_plate_assets.py
+
+      - name: Build .app with PyInstaller
+        shell: bash
+        run: |
+          set -euo pipefail
+          # آیکون .icns از لوگوی شیلد (غیر حیاتی؛ اگر نشد بدون آیکون ادامه می‌دهیم)
+          ICON_ARG=()
+          if [ -f "assets/logo_shield.png" ]; then
+            rm -rf /tmp/ias.iconset && mkdir -p /tmp/ias.iconset
+            if sips -z 1024 1024 "assets/logo_shield.png" --out /tmp/ias.iconset/icon_512x512@2x.png >/dev/null 2>&1 \
+               && sips -z 512 512 "assets/logo_shield.png" --out /tmp/ias.iconset/icon_512x512.png >/dev/null 2>&1 \
+               && sips -z 256 256 "assets/logo_shield.png" --out /tmp/ias.iconset/icon_256x256.png >/dev/null 2>&1 \
+               && sips -z 128 128 "assets/logo_shield.png" --out /tmp/ias.iconset/icon_128x128.png >/dev/null 2>&1 \
+               && iconutil -c icns /tmp/ias.iconset -o /tmp/ias.icns >/dev/null 2>&1; then
+              ICON_ARG=(--icon=/tmp/ias.icns)
+              echo "icns icon ready."
+            else
+              echo "WARNING: icns generation failed; continuing without icon."
+            fi
+          fi
+          pyi_args=(
+            --onedir
+            --noconfirm
+            --clean
+            --windowed
+            "--name=$APP_NAME"
+            --hidden-import=_socket
+            --hidden-import=socket
+            --hidden-import=_ssl
+            --hidden-import=ssl
+            --add-data=faces:faces
+            --add-data=yolov8n.pt:.
+            --add-data=CHANGELOG_FA.md:.
+            --add-data=segformer_floor_model:segformer_floor_model
+            --collect-all=ultralytics
+            --collect-all=torch
+            --collect-all=torchvision
+            --collect-all=transformers
+            --collect-all=face_recognition_models
+            --collect-all=cv2
+            --collect-all=onvif
+            --distpath=dist
+            "${ICON_ARG[@]}"
+          )
+          # مدل پلاک‌خوان (اجباری)
+          test -f "plate_detector.pt" || { echo "FAIL: plate_detector.pt آماده نیست."; exit 1; }
+          pyi_args+=(--add-data=plate_detector.pt:.)
+          test -f "plate_ocr_models/hezar_plate_v2.onnx" || { echo "FAIL: plate_ocr_models آماده نیست."; exit 1; }
+          pyi_args+=(--add-data=plate_ocr_models:plate_ocr_models)
+          # onnxruntime برای پلاک‌خوان
+          python -c "import onnxruntime" 2>/dev/null && pyi_args+=(--collect-all=onnxruntime) || echo "WARNING: onnxruntime نصب نیست."
+          # ezdxf (نقشه‌ی DXF) اختیاری
+          python -c "import ezdxf" 2>/dev/null && pyi_args+=(--collect-all=ezdxf) || echo "WARNING: ezdxf نصب نیست؛ نقشه‌ی DXF غیرفعال می‌ماند."
+          if [ -d "assets" ]; then pyi_args+=(--add-data=assets:assets); fi
+          echo "PyInstaller args: ${pyi_args[*]}"
+          python -m PyInstaller "${pyi_args[@]}" main.py
+          test -d "dist/$APP_NAME.app" || { echo "FAIL: dist/$APP_NAME.app ساخته نشد."; exit 1; }
+          echo "OK: dist/$APP_NAME.app"
+
+      - name: Place updater-convention files at bundle root
+        # قرارداد آپدیتر: get_install_dir روی مک = ریشه‌ی باندل .app؛ پس
+        # version.txt و CHANGELOG_FA.md باید کنار Contents باشند تا
+        # پنجره‌ی «به‌روزرسانی انجام شد» و تشخیص نسخه درست کار کنند.
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE="dist/$APP_NAME.app"
+          cp version.txt "$BUNDLE/version.txt"
+          cp CHANGELOG_FA.md "$BUNDLE/CHANGELOG_FA.md"
+          echo "bundle root:" && ls "$BUNDLE"
+
+      - name: Download previous macOS manifest (for diff update)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p prev
+          runId="$(gh run list --workflow=build-macos.yml --status=success --limit=1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
+          if [ -n "$runId" ]; then
+            gh run download "$runId" -n IAS-Viewer-MAC-manifest -D prev 2>&1 || true
+          fi
+          if [ -f prev/manifest.json ]; then
+            echo "PREV_MANIFEST=prev/manifest.json" >> "$GITHUB_ENV"
+            echo "previous macOS manifest found."
+          else
+            echo "PREV_MANIFEST=" >> "$GITHUB_ENV"
+            echo "no previous manifest; update will be full payload."
+          fi
+
+      - name: Generate update manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE="dist/$APP_NAME.app"
+          python installer/make_update.py manifest --dist "$BUNDLE" --version "$APP_VERSION" --out "$BUNDLE/manifest.json"
+          cp "$BUNDLE/manifest.json" dist/manifest.json
+
+      - name: Build update package (diff)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE="dist/$APP_NAME.app"
+          prevArg=()
+          if [ -n "${PREV_MANIFEST:-}" ] && [ -f "$PREV_MANIFEST" ]; then prevArg=(--prev "$PREV_MANIFEST"); fi
+          python installer/make_update.py package --dist "$BUNDLE" --version "$APP_VERSION" "${prevArg[@]}" \
+            --out "dist/IAS-Viewer-MAC-Update-v$APP_VERSION.zip" --stagedir update_staging --app IAS-Viewer-MAC
+          ls -la dist/IAS-Viewer-MAC-Update-*.zip
+
+      - name: Create DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          # DMG ساده: باندل .app داخلش؛ کاربر درگ می‌کند به Applications
+          hdiutil create -volname "IAS Viewer" -srcfolder "dist/$APP_NAME.app" \
+            -ov -format UDZO "dist/IAS-Viewer-macOS-v$APP_VERSION.dmg"
+          ls -la dist/*.dmg
+
+      - name: Smoke test (offscreen import)
+        # فقط import سبک ماژول‌های پلتفرم؛ اجرای کامل GUI روی رانر لازم نیست.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'EOF'
+          import sys
+          sys.path.insert(0, ".")
+          import platform_compat as pc
+          assert pc.is_macos() or True
+          import update_checker as uc
+          assert uc.GITHUB_REPO == "thaarfknight-star/IAS-Viewer-MAC", uc.GITHUB_REPO
+          assert uc._asset_version("IAS-Viewer-MAC-Update-v2.0.77-beta.zip") == "2.0.77-beta"
+          import updater as up
+          assert up.UPDATE_APP_ID == "IAS-Viewer-MAC"
+          print("macOS smoke OK")
+          EOF
+
+      - name: Upload update package
+        uses: actions/upload-artifact@v4
+        with:
+          name: IAS-Viewer-MAC-Update
+          path: dist/IAS-Viewer-MAC-Update-*.zip
+          if-no-files-found: error
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: IAS-Viewer-MAC-DMG
+          path: dist/*.dmg
+          if-no-files-found: warn
+
+      - name: Upload manifest (for next diff update)
+        uses: actions/upload-artifact@v4
+        with:
+          name: IAS-Viewer-MAC-manifest
+          path: dist/manifest.json
+          if-no-files-found: warn
+
+      - name: Publish update package to GitHub Release
+        # فقط با اجرای دستی ورک‌فلو + تیک publish_release.
+        # تگ مک «mac-vX.Y.Z-beta» است (جدا از تگ ویندوز).
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ver="$APP_VERSION"
+          tag="mac-v$ver"
+          zip=(dist/IAS-Viewer-MAC-Update-v"$ver".zip)
+          test -f "${zip[0]}" || { echo "FAIL: update zip not found"; exit 1; }
+          dmg=(dist/IAS-Viewer-macOS-v"$ver".dmg)
+          notes="IAS Viewer $ver — نسخه‌ی مک (macOS)."
+          m="$(grep -m1 -F "**نسخه‌ی $ver" README.md || true)"
+          if [ -n "$m" ]; then notes="$m"; fi
+          notes="$notes
+
+          نصب: فایل DMG را باز کنید و IAS Viewer را به Applications بکشید.
+          اولین اجرا: چون برنامه امضا نشده، روی IAS Viewer راست‌کلیک ← Open کنید."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${zip[0]}" --clobber
+            if [ -f "${dmg[0]}" ]; then gh release upload "$tag" "${dmg[0]}" --clobber; fi
+          else
+            files=("${zip[0]}")
+            if [ -f "${dmg[0]}" ]; then files+=("${dmg[0]}"); fi
+            gh release create "$tag" "${files[@]}" --title "IAS Viewer $ver (macOS)" --notes "$notes" --prerelease
+          fi
+          echo "OK: ${zip[0]} -> release $tag"

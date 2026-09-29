@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-journal
+.pytest_cache/
+update_staging/
+prev/
+dist/
+build/
+*.spec
+.DS_Store
+.vault_key

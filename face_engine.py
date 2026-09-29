@@ -1,0 +1,256 @@
+import os
+import json
+import time
+import uuid
+import threading
+
+import cv2
+import numpy as np
+import face_recognition
+
+
+class FaceEngine:
+    """Face library + recognizer.
+
+    Every registered person can carry: name, phone number, employee id and a
+    free-text note, alongside the face embedding used for matching.
+    """
+
+    def __init__(
+        self,
+        db_path=None,
+        faces_dir=None,
+        unknown_faces_dir=None,
+        tolerance=0.5,
+        unknown_alert_cooldown=6.0,
+        known_alert_cooldown=15.0,
+    ):
+        # مسیر پیش‌فرض: پوشه‌ی یکتای دیتای کاربر (app_paths) تا نسخه‌ی
+        # نصب‌شده و portable دیتابیس جدا نسازند.
+        if db_path is None or faces_dir is None or unknown_faces_dir is None:
+            try:
+                from app_paths import get_data_dir
+                _dd = get_data_dir()
+            except Exception:
+                _dd = "."
+            if db_path is None:
+                db_path = os.path.join(_dd, "face_db.json")
+            if faces_dir is None:
+                faces_dir = os.path.join(_dd, "faces")
+            if unknown_faces_dir is None:
+                unknown_faces_dir = os.path.join(_dd, "unknown_faces")
+        self.db_path = db_path
+        self.faces_dir = faces_dir
+        # رفع درخواست: چهره‌های شناسایی‌شده که در بانک چهره‌ها تعریف نشده‌اند
+        # (تعریف‌نشده) به‌صورت خودکار بر اساس تاریخ و ساعت در این پوشه ذخیره
+        # می‌شوند - رجوع کنید به save_unknown_face پایین‌تر.
+        self.unknown_faces_dir = unknown_faces_dir
+        self.tolerance = tolerance
+        self.unknown_alert_cooldown = unknown_alert_cooldown
+        self.known_alert_cooldown = known_alert_cooldown
+
+        self.people = []  # each: id, name, phone, employee_id, note, work_group, encoding, photo, created_at
+
+        self._last_unknown_alert = 0.0
+        self._last_seen_person = {}  # person_id -> last notified timestamp
+
+        # نکته کلیدی برای رفع کرش هنگام «تعریف چهره»:
+        #   کتابخانه face_recognition (dlib) برای فراخوانی هم‌زمان (concurrent) از چند ترد
+        #   thread-safe نیست. در این برنامه، ترد پخش زنده هر دوربین به‌صورت مداوم
+        #   FaceEngine.recognize() را در پس‌زمینه صدا می‌زند و هم‌زمان کاربر می‌تواند از
+        #   ترد اصلی (UI) هنگام «افزودن چهره از تصویر زنده» متد register_face() را صدا بزند.
+        #   برخورد این دو فراخوانی با هم روی مدل dlib باعث کرش کامل برنامه می‌شد.
+        #   با این قفل، تمام عملیات تشخیص/ثبت/ویرایش/حذف که با dlib یا لیست self.people
+        #   سروکار دارند، سریالایز (یکی‌یکی) اجرا می‌شوند.
+        self._lock = threading.RLock()
+
+        os.makedirs(self.faces_dir, exist_ok=True)
+        os.makedirs(self.unknown_faces_dir, exist_ok=True)
+        self.load()
+
+    # ---------- persistence ----------
+
+    def load(self):
+        if os.path.exists(self.db_path):
+            try:
+                with open(self.db_path, "r", encoding="utf-8") as f:
+                    self.people = json.load(f)
+            except Exception as e:
+                print(f"خطا در بارگذاری بانک چهره‌ها: {e}")
+                self.people = []
+
+    def save(self):
+        try:
+            with open(self.db_path, "w", encoding="utf-8") as f:
+                json.dump(self.people, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"خطا در ذخیره بانک چهره‌ها: {e}")
+
+    def _encodings_matrix(self):
+        return [np.array(p["encoding"]) for p in self.people]
+
+    # ---------- CRUD for the face library ----------
+
+    def list_work_groups(self):
+        """لیست یکتای گروه‌های کاری تعریف‌شده (برای پیشنهاد در فرم‌ها و فیلتر)."""
+        groups = set()
+        for p in self.people:
+            g = (p.get("work_group") or "").strip()
+            if g:
+                groups.add(g)
+        return sorted(groups)
+
+    def list_people(self):
+        """Metadata only (no raw encoding) - safe for the UI table."""
+        return [{k: v for k, v in p.items() if k != "encoding"} for p in self.people]
+
+    def get_person(self, person_id):
+        for p in self.people:
+            if p["id"] == person_id:
+                return p
+        return None
+
+    def register_face(self, name, image_frame, phone="", employee_id="", note="",
+                      work_group=""):
+        """Detect the face in image_frame and add it as a new library entry.
+        Returns the created person dict, or None if no face was found."""
+        with self._lock:
+            rgb = cv2.cvtColor(image_frame, cv2.COLOR_BGR2RGB)
+            boxes = face_recognition.face_locations(rgb, model="hog")
+            encodings = face_recognition.face_encodings(rgb, boxes)
+            if not encodings:
+                return None
+
+            person_id = str(uuid.uuid4())
+            photo_path = os.path.join(self.faces_dir, f"{person_id}.jpg")
+            cv2.imwrite(photo_path, image_frame)
+
+            person = {
+                "id": person_id,
+                "name": name,
+                "phone": phone,
+                "employee_id": employee_id,
+                "note": note,
+                "work_group": (work_group or "").strip(),
+                "encoding": encodings[0].tolist(),
+                "photo": photo_path,
+                "created_at": time.time(),
+            }
+            self.people.append(person)
+            self.save()
+            return person
+
+    def save_unknown_face(self, image_frame):
+        """رفع درخواست: چهره‌ی شناسایی‌شده‌ای که در بانک چهره‌ها تعریف نشده
+        («چهره تعریف نشده») را روی دیسک، داخل یک زیرپوشه بر اساس تاریخ
+        (مثلاً unknown_faces/2026-08-25) و با نامی بر اساس ساعت دقیق دیدن آن
+        (مثلاً 14-05-32_ab12cd34.jpg) ذخیره می‌کند تا بعداً قابل بازبینی
+        باشد. در صورت موفقیت مسیر فایل ذخیره‌شده را برمی‌گرداند، در غیر این
+        صورت None."""
+        if image_frame is None:
+            return None
+        try:
+            now = time.localtime()
+            day_dir = os.path.join(self.unknown_faces_dir, time.strftime("%Y-%m-%d", now))
+            os.makedirs(day_dir, exist_ok=True)
+            filename = f"{time.strftime('%H-%M-%S', now)}_{uuid.uuid4().hex[:8]}.jpg"
+            path = os.path.join(day_dir, filename)
+            cv2.imwrite(path, image_frame)
+            return path
+        except Exception as e:
+            print(f"خطا در ذخیره‌ی چهره‌ی تعریف‌نشده: {e}")
+            return None
+
+    def update_person(self, person_id, **fields):
+        with self._lock:
+            for p in self.people:
+                if p["id"] == person_id:
+                    p.update(fields)
+                    self.save()
+                    return p
+            return None
+
+    def delete_person(self, person_id):
+        with self._lock:
+            person = self.get_person(person_id)
+            if person and os.path.exists(person.get("photo", "")):
+                try:
+                    os.remove(person["photo"])
+                except OSError:
+                    pass
+            self.people = [p for p in self.people if p["id"] != person_id]
+            self._last_seen_person.pop(person_id, None)
+            self.save()
+
+    # ---------- recognition ----------
+
+    def recognize(self, frame, downscale=0.5):
+        """Detect + match every face in a frame.
+
+        Returns (results, unknown_event, known_events):
+          - results: [{"box": (top,right,bottom,left) in full-frame coords, "person": dict|None}]
+          - unknown_event: باکس (top,right,bottom,left) یکی از چهره‌های تعریف‌نشده‌ی
+            همین فریم، فقط وقتی کول‌داون یک اعلان تازه‌ی "چهره تعریف نشده" سپری شده
+            باشد؛ در غیر این صورت None. این باکس برای برش تصویر همان چهره و نمایش
+            در پنل تشخیص چهره استفاده می‌شود.
+          - known_events: لیستی از تاپل‌های (person, box) که تازه (با رعایت
+            کول‌داون - تا از اسپم‌شدن پنل با هر فریم جلوگیری شود) دوباره تایید
+            شده‌اند.
+        """
+        # این متد به‌طور مداوم از ترد(های) پخش زنده صدا زده می‌شود؛ قفل تضمین می‌کند که
+        # هم‌زمان با ثبت/ویرایش/حذف چهره (که از ترد UI اجرا می‌شود) به dlib یا
+        # self.people دسترسی هم‌زمان (race condition) صورت نگیرد که باعث کرش می‌شد.
+        with self._lock:
+            small = cv2.resize(frame, (0, 0), fx=downscale, fy=downscale)
+            rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+            locations = face_recognition.face_locations(rgb_small, model="hog")
+            encodings = face_recognition.face_encodings(rgb_small, locations)
+
+            known_encodings = self._encodings_matrix()
+            scale = 1.0 / downscale
+            now = time.time()
+
+            results = []
+            first_unknown_box = None
+            known_events = []
+
+            for (top, right, bottom, left), enc in zip(locations, encodings):
+                box = (int(top * scale), int(right * scale), int(bottom * scale), int(left * scale))
+                person = None
+                if known_encodings:
+                    matches = face_recognition.compare_faces(known_encodings, enc, tolerance=self.tolerance)
+                    distances = face_recognition.face_distance(known_encodings, enc)
+                    best_idx = int(np.argmin(distances)) if len(distances) else -1
+                    if best_idx != -1 and matches[best_idx]:
+                        person = self.people[best_idx]
+
+                if person:
+                    last_seen = self._last_seen_person.get(person["id"], 0)
+                    if now - last_seen >= self.known_alert_cooldown:
+                        self._last_seen_person[person["id"]] = now
+                        known_events.append((person, box))
+                else:
+                    if first_unknown_box is None:
+                        first_unknown_box = box
+
+                results.append({"box": box, "person": person})
+
+            unknown_event = None
+            if first_unknown_box is not None and (now - self._last_unknown_alert) >= self.unknown_alert_cooldown:
+                self._last_unknown_alert = now
+                unknown_event = first_unknown_box
+
+            return results, unknown_event, known_events
+
+    def draw_results(self, frame, results):
+        """Overlay boxes + labels in-place. Unmatched faces are explicitly
+        labeled as 'چهره تعریف نشده' (undefined face)."""
+        for r in results:
+            top, right, bottom, left = r["box"]
+            person = r["person"]
+            label = person["name"] if person else "چهره تعریف نشده"
+            color = (0, 200, 0) if person else (0, 0, 255)
+            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+            cv2.rectangle(frame, (left, max(top, bottom - 24)), (right, bottom), color, cv2.FILLED)
+            cv2.putText(frame, label, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1)
+        return frame

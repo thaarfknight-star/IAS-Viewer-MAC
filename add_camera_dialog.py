@@ -1,0 +1,283 @@
+from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QFormLayout, QLineEdit, QCheckBox, QLabel,
+    QDialogButtonBox, QMessageBox, QComboBox, QSpinBox,
+)
+
+from rtsp_utils import build_rtsp_url, probe_stream
+
+# مسیرهای استاندارد RTSP ویژه Sunell، IAP، Dahua، Hikvision و سایر برندها
+CANDIDATE_PATHS = [
+    # Sunell
+    "live/ch0",
+    "snscview",
+    "live/main",
+    "live/ch1",
+    "ch0",
+    "h264/ch1/main/av_stream",
+    # IAP & Dahua
+    "cam/realmonitor?channel=1&subtype=0",
+    "cam/realmonitor?channel=1&subtype=1",
+    # Hikvision
+    "Streaming/Channels/101",
+    "Streaming/Channels/1",
+    # Generic & XM
+    "h264Preview_01_main",
+    "stream1",
+    "video1",
+    "media/video1",
+    "onvif1",
+    "profile1",
+    ""
+]
+
+
+class AutoDetectThread(QThread):
+    progress_signal = pyqtSignal(str)
+    found_signal = pyqtSignal(str, str)
+    failed_signal = pyqtSignal(str)
+
+    def __init__(self, ip, port, user, pwd):
+        super().__init__()
+        self.ip = ip
+        self.port = port
+        self.user = user
+        self.pwd = pwd
+        self._is_cancelled = False
+
+    def run(self):
+        for path in CANDIDATE_PATHS:
+            if self._is_cancelled:
+                return
+
+            path_display = path if path else "(root)"
+            self.progress_signal.emit(f"در حال بررسی مسیر: {path_display}...")
+
+            # build_rtsp_url: کاراکترهای خاص URL داخل رمز عبور را encode می‌کند؛
+            # probe_stream: با چند تلاش پیاپی، false negative ناشی از تاخیر
+            # رسیدن اولین کی‌فریم را رفع می‌کند — رجوع کنید به rtsp_utils.py.
+            url = build_rtsp_url(self.ip, self.port, self.user, self.pwd, path)
+            if probe_stream(url):
+                self.found_signal.emit(path, url)
+                return
+
+        self.failed_signal.emit("هیچ مسیر معتبری با این مشخصات یافت نشد. نام کاربری، رمز عبور یا پورت را بررسی کنید.")
+
+    def cancel(self):
+        self._is_cancelled = True
+
+
+class AddCameraDialog(QDialog):
+    """افزودن یا ویرایش یک دوربین همراه با نام دلخواه (درب اصلی، حیاط، راهرو و ...)."""
+
+    def __init__(self, parent=None, existing_cam=None):
+        super().__init__(parent)
+        self.setWindowTitle("ویرایش دوربین" if existing_cam else "افزودن دوربین جدید")
+        self.setMinimumWidth(360)
+        self.auto_detect_thread = None
+        self.detected_path = None
+        self.detected_full_url = None
+
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("مثلاً: درب اصلی، حیاط، راهرو")
+        self.ip_input = QLineEdit()
+        self.ip_input.setPlaceholderText("IP دوربین یا NVR")
+        self.port_input = QLineEdit("554")
+        self.user_input = QLineEdit("admin")
+        self.pass_input = QLineEdit()
+        self.pass_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.auto_detect_chk = QCheckBox("تشخیص خودکار مسیر دوربین (Sunell, IAP, ...)")
+        self.auto_detect_chk.setChecked(True)
+        self.auto_detect_chk.toggled.connect(lambda checked: self.path_input.setEnabled(not checked))
+
+        self.path_input = QLineEdit("live/ch0")
+        self.path_input.setPlaceholderText("مسیر دستی استریم")
+        self.path_input.setEnabled(False)
+
+        # طبقه‌ی دوربین (کنترل تردد طبقاتی) — لیست از نقشه‌ی ساختمان
+        self.floor_combo = QComboBox()
+        self.floor_combo.addItem("— (تعریف نشده)", "")
+        try:
+            from floor_access import get_floor_list
+            for fid, fname in get_floor_list():
+                self.floor_combo.addItem(fname, fid)
+        except Exception:
+            pass
+        self.floor_combo.setToolTip(
+            "طبقه‌ای که این دوربین در آن قرار دارد.\n"
+            "اگر دوربین روی «نقشه‌ی ساختمان» در طبقه‌ای قرار گیرد،\n"
+            "خودکار همین‌جا سینک می‌شود.")
+
+        # (2.0.61-beta) گروه‌بندی دوربین‌ها — کامبوی قابل‌ویرایش با گروه‌های موجود
+        self.group_combo = QComboBox()
+        self.group_combo.setEditable(True)
+        self.group_combo.addItem("— (بدون گروه)", "")
+        try:
+            _groups = parent.camera_store.get_groups() if hasattr(parent, "camera_store") else []
+            for _g in _groups:
+                self.group_combo.addItem(_g, _g)
+        except Exception:
+            pass
+        self.group_combo.setToolTip(
+            "گروه نمایشی این دوربین (مثلاً «طبقه اول»، «پارکینگ»).\n"
+            "می‌توانید نام جدیدی هم تایپ کنید.")
+
+        # (2.0.64-beta) بیت‌ریت درخواستی این دوربین — واحد (kbps) کنار کادر
+        # نوشته می‌شود. صفر یعنی «خودکار»: در مدیریت پهنای باند، سهم برابر
+        # از سقف کلی می‌گیرد؛ اگر عدد بگذارید، دقیقاً همان مقدار به دوربین
+        # تخصیص داده و (برای دوربین مستقیم، از طریق ONVIF) اعمال می‌شود.
+        self.bitrate_spin = QSpinBox()
+        self.bitrate_spin.setRange(0, 100000)
+        self.bitrate_spin.setSingleStep(256)
+        self.bitrate_spin.setSuffix(" kbps")
+        self.bitrate_spin.setSpecialValueText("خودکار")
+        self.bitrate_spin.setMinimumWidth(160)
+        self.bitrate_spin.setToolTip(
+            "بیت‌ریت درخواستی این دوربین به کیلوبیت/ثانیه (kbps).\n"
+            "«خودکار» (۰) یعنی سهم برابر از سقف کلی پهنای باند.\n"
+            "اگر عدد تعیین کنید، در «مدیریت پهنای باند» دقیقاً همان مقدار\n"
+            "به این دوربین تخصیص داده می‌شود.")
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #aaaaaa; font-size: 11px;")
+
+        if existing_cam:
+            self.name_input.setText(existing_cam.get("name", ""))
+            self.ip_input.setText(existing_cam.get("ip", ""))
+            self.port_input.setText(str(existing_cam.get("port", "554")))
+            self.user_input.setText(existing_cam.get("user", ""))
+            self.pass_input.setText(existing_cam.get("pass", ""))
+            self.auto_detect_chk.setChecked(False)
+            self.path_input.setText(existing_cam.get("path", ""))
+            self.path_input.setEnabled(True)
+            # طبقه‌ی ذخیره‌شده را انتخاب کن
+            _ef = str(existing_cam.get("floor_id") or "")
+            if _ef:
+                _idx = self.floor_combo.findData(_ef)
+                if _idx >= 0:
+                    self.floor_combo.setCurrentIndex(_idx)
+            # گروه ذخیره‌شده را انتخاب کن (یا اگر جزو لیست نیست، تایپ‌شده بماند)
+            _eg = str(existing_cam.get("group") or "").strip()
+            if _eg:
+                _gidx = self.group_combo.findData(_eg)
+                if _gidx >= 0:
+                    self.group_combo.setCurrentIndex(_gidx)
+                else:
+                    self.group_combo.setEditText(_eg)
+            # بیت‌ریت درخواستی ذخیره‌شده (رکوردهای قدیمی: خودکار)
+            try:
+                _eb = int(float(existing_cam.get("bitrate_kbps") or 0))
+            except Exception:
+                _eb = 0
+            self.bitrate_spin.setValue(max(0, _eb))
+
+        form = QFormLayout()
+        form.addRow("نام دوربین:", self.name_input)
+        form.addRow("آدرس IP:", self.ip_input)
+        form.addRow("پورت:", self.port_input)
+        form.addRow("نام کاربری:", self.user_input)
+        form.addRow("رمز عبور:", self.pass_input)
+        form.addRow("🏢 طبقه:", self.floor_combo)
+        form.addRow("📁 گروه:", self.group_combo)
+        form.addRow("بیت‌ریت درخواستی (kbps):", self.bitrate_spin)
+        form.addRow(self.auto_detect_chk)
+        form.addRow("مسیر دستی:", self.path_input)
+        form.addRow(self.status_label)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.handle_accept)
+        self.buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(self.buttons)
+        self.setLayout(layout)
+
+    def set_detected_stream(self, path=None, full_url=None):
+        """مسیر/آدرس استریم را که از قبل (مثلاً با تشخیص خودکار نوع دستگاه
+        بعد از اسکن شبکه - رجوع کنید به device_detect.py) پیدا شده، از پیش پر
+        می‌کند تا کاربر مجبور به تکرار دوباره‌ی جستجو نباشد."""
+        self.auto_detect_chk.setChecked(False)
+        self.auto_detect_chk.setEnabled(False)
+        self.path_input.setEnabled(True)
+        self.detected_full_url = full_url
+        if full_url:
+            self.path_input.setText(full_url)
+            self.path_input.setEnabled(False)
+        elif path is not None:
+            self.path_input.setText(path)
+        self.status_label.setText("مسیر استریم به‌صورت خودکار شناسایی شد.")
+
+    def handle_accept(self):
+        ip = self.ip_input.text().strip()
+        if not ip:
+            QMessageBox.warning(self, "خطا", "لطفاً آدرس IP را وارد کنید.")
+            return
+
+        if self.auto_detect_chk.isChecked():
+            self.buttons.setEnabled(False)
+            self.status_label.setText("در حال جستجوی خودکار مسیر استریم...")
+            self.auto_detect_thread = AutoDetectThread(
+                ip, self.port_input.text().strip() or "554",
+                self.user_input.text().strip(), self.pass_input.text().strip()
+            )
+            self.auto_detect_thread.progress_signal.connect(self.status_label.setText)
+            self.auto_detect_thread.found_signal.connect(self._on_path_found)
+            self.auto_detect_thread.failed_signal.connect(self._on_path_failed)
+            self.auto_detect_thread.start()
+        else:
+            self.detected_path = self.path_input.text().strip()
+            self.accept()
+
+    def _on_path_found(self, path, _full_url):
+        self.detected_path = path
+        self.buttons.setEnabled(True)
+        self.accept()
+
+    def _on_path_failed(self, err_msg):
+        self.buttons.setEnabled(True)
+        self.status_label.setText("مسیر پیدا نشد.")
+        QMessageBox.warning(self, "عدم اتصال", err_msg)
+
+    def closeEvent(self, event):
+        # اگر تشخیص خودکار هنوز در حال اجراست و کاربر پنجره را (مثلاً از دکمه‌ی
+        # ضربدر) می‌بندد، باید ترد پس‌زمینه به‌درستی متوقف شود؛ در غیر این صورت
+        # Qt هنگام تخریب یک QThread هنوز در حال اجرا کرش می‌کند.
+        if self.auto_detect_thread and self.auto_detect_thread.isRunning():
+            self.auto_detect_thread.cancel()
+            self.auto_detect_thread.wait(3000)
+        event.accept()
+
+    def reject(self):
+        if self.auto_detect_thread and self.auto_detect_thread.isRunning():
+            self.auto_detect_thread.cancel()
+            self.auto_detect_thread.wait(3000)
+        super().reject()
+
+    def get_camera_data(self):
+        # گروه: اگر آیتم «بدون گروه» انتخاب شده، خالی؛ اگر گروه موجود انتخاب
+        # شده، همان؛ اگر نام جدید تایپ شده (currentData=None)، متن تایپ‌شده.
+        _gdata = self.group_combo.currentData()
+        if isinstance(_gdata, str):
+            _group = _gdata.strip()
+        else:
+            _group = (self.group_combo.currentText() or "").strip()
+            if _group == "— (بدون گروه)":
+                _group = ""
+        return {
+            "name": self.name_input.text().strip() or self.ip_input.text().strip(),
+            "ip": self.ip_input.text().strip(),
+            "port": self.port_input.text().strip() or "554",
+            "user": self.user_input.text().strip(),
+            "pass": self.pass_input.text().strip(),
+            "path": "" if self.detected_full_url else (
+                self.detected_path if self.detected_path is not None else self.path_input.text().strip()
+            ),
+            "full_url": self.detected_full_url,
+            "floor_id": self.floor_combo.currentData() or "",
+            "group": _group,
+            "bitrate_kbps": int(self.bitrate_spin.value()),
+        }
