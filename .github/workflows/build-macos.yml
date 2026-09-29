@@ -63,6 +63,47 @@ jobs:
           set -euo pipefail
           python ci/prepare_plate_assets.py
 
+      - name: Cache yolov8n weights (person detection)
+        # مثل ورک‌فلو ویندوز: وزن yolov8n.pt فقط یک‌بار دانلود و در کش
+        # نگه داشته می‌شود (person_detector.py در runtime آن را می‌خواهد).
+        id: yolov8n-weights-cache
+        uses: actions/cache@v4
+        with:
+          path: yolov8n.pt
+          key: yolov8n-weights-v1
+
+      - name: Download yolov8n.pt (فقط اگر در کش نبود)
+        if: steps.yolov8n-weights-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "yolov8n.pt" ]; then
+            python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" || true
+          fi
+          if [ ! -f "yolov8n.pt" ]; then
+            curl -sSL -o yolov8n.pt "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt"
+          fi
+          test -f "yolov8n.pt" || { echo "FAIL: دانلود yolov8n.pt موفق نشد."; exit 1; }
+          echo "yolov8n.pt آماده‌ی بسته‌بندی است: $(wc -c < yolov8n.pt) بایت"
+
+      - name: Cache SegFormer floor-detection weights
+        # مثل ورک‌فلو ویندوز: وزن SegFormer-B0 فقط یک‌بار دانلود و در کش
+        # نگه داشته می‌شود (floor_detector.py در runtime آن را می‌خواهد).
+        id: segformer-weights-cache
+        uses: actions/cache@v4
+        with:
+          path: segformer_floor_model
+          key: segformer-floor-weights-v1
+
+      - name: Download SegFormer weights (فقط اگر در کش نبود)
+        if: steps.segformer-weights-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c "from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation; m='nvidia/segformer-b0-finetuned-ade-512-512'; p=SegformerImageProcessor.from_pretrained(m); mdl=SegformerForSemanticSegmentation.from_pretrained(m); p.save_pretrained('segformer_floor_model'); mdl.save_pretrained('segformer_floor_model')"
+          test -f "segformer_floor_model/config.json" || { echo "FAIL: دانلود وزن SegFormer موفق نشد."; exit 1; }
+          echo "segformer_floor_model آماده‌ی بسته‌بندی است."
+
       - name: Build .app with PyInstaller
         shell: bash
         run: |
