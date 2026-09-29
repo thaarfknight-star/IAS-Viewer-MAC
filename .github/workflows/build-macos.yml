@@ -145,7 +145,7 @@ jobs:
             --collect-all=cv2
             --collect-all=onvif
             --distpath=dist
-            "${ICON_ARG[@]}"
+            ${ICON_ARG[@]+"${ICON_ARG[@]}"}
           )
           # مدل پلاک‌خوان (اجباری)
           test -f "plate_detector.pt" || { echo "FAIL: plate_detector.pt آماده نیست."; exit 1; }
@@ -207,7 +207,10 @@ jobs:
           BUNDLE="dist/$APP_NAME.app"
           prevArg=()
           if [ -n "${PREV_MANIFEST:-}" ] && [ -f "$PREV_MANIFEST" ]; then prevArg=(--prev "$PREV_MANIFEST"); fi
-          python installer/make_update.py package --dist "$BUNDLE" --version "$APP_VERSION" "${prevArg[@]}" \
+          # نکته: bash مک (3.2) با set -u روی آرایه‌ی خالی "${prevArg[@]}"
+          # خطای unbound variable می‌دهد؛ فرم ${arr[@]+"${arr[@]}"} روی
+          # bash قدیمی هم سالم است.
+          python installer/make_update.py package --dist "$BUNDLE" --version "$APP_VERSION" ${prevArg[@]+"${prevArg[@]}"} \
             --out "dist/IAS-Viewer-MAC-Update-v$APP_VERSION.zip" --stagedir update_staging --app IAS-Viewer-MAC
           ls -la dist/IAS-Viewer-MAC-Update-*.zip
 
