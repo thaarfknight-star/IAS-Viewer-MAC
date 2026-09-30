@@ -86,6 +86,27 @@ jobs:
           test -f "yolov8n.pt" || { echo "FAIL: دانلود yolov8n.pt موفق نشد."; exit 1; }
           echo "yolov8n.pt آماده‌ی بسته‌بندی است: $(wc -c < yolov8n.pt) بایت"
 
+      - name: Cache fire-smoke weights (fire & smoke detection)
+        # موتور تشخیص آتش/دود (fire_smoke_detector.py): وزن YOLOv8n
+        # آموزش‌دیده‌ی fire/smoke — مثل yolov8n.pt بالا.
+        id: fire-smoke-weights-cache
+        uses: actions/cache@v4
+        with:
+          path: fire_smoke.pt
+          key: fire-smoke-weights-v1
+
+      - name: Download fire_smoke.pt (فقط اگر در کش نبود)
+        if: steps.fire-smoke-weights-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "fire_smoke.pt" ]; then
+            curl -sSL -o fire_smoke.pt "https://github.com/shreyaa4567/industrial-smoke-and-fire-detection/raw/main/best_shreya_v2.pt"
+          fi
+          test -f "fire_smoke.pt" || { echo "FAIL: دانلود fire_smoke.pt موفق نشد."; exit 1; }
+          python -c "from ultralytics import YOLO; m=YOLO('fire_smoke.pt'); assert set(m.names.values())>={'fire','smoke'}, m.names; print('fire_smoke.pt OK:', m.names)"
+          echo "fire_smoke.pt آماده‌ی بسته‌بندی است: $(wc -c < fire_smoke.pt) بایت"
+
       - name: Cache SegFormer floor-detection weights
         # مثل ورک‌فلو ویندوز: وزن SegFormer-B0 فقط یک‌بار دانلود و در کش
         # نگه داشته می‌شود (floor_detector.py در runtime آن را می‌خواهد).
@@ -135,6 +156,7 @@ jobs:
             --hidden-import=ssl
             --add-data=faces:faces
             --add-data=yolov8n.pt:.
+            --add-data=fire_smoke.pt:.
             --add-data=CHANGELOG_FA.md:.
             --add-data=segformer_floor_model:segformer_floor_model
             --collect-all=ultralytics
