@@ -4250,6 +4250,16 @@ class MainWindow(QMainWindow):
         cam = self.camera_store.get_camera(cam_id)
         if not cam:
             return
+        # اگر کانال NVR است، IP و پورت RTSP خودِ NVR را هم به رکورد اضافه
+        # می‌کنیم تا «شنیدن صدا» بتواند پروکسی NVR را امتحان کند (حتی اگر
+        # کانال با «اتصال مستقیم» به IP دوربین ثبت شده باشد)
+        nvr_id = cam.get("nvr_id")
+        if nvr_id:
+            nvr = self.camera_store.get_nvr(nvr_id)
+            if nvr and nvr.get("ip"):
+                cam = dict(cam)
+                cam["_nvr_ip"] = nvr.get("ip")
+                cam["_nvr_rtsp_port"] = nvr.get("rtsp_port") or 554
         dlg = ListenDialog(cam, parent=self)
         dlg.exec()
 
@@ -4295,7 +4305,7 @@ class MainWindow(QMainWindow):
 
     def _ensure_password(self, cam: dict) -> bool:
         """(2.0.15-beta) رمز دوربین/NVR: اگر ذخیره‌ی امن فعال باشد، رمز از
-        دیسک (رمزنگاری‌شده با DPAPI/Keychain) خوانده شده و این‌جا از قبل در حافظه
+        دیسک (رمزنگاری‌شده با DPAPI) خوانده شده و این‌جا از قبل در حافظه
         هست؛ در غیر این صورت (یا اگر رمزی ذخیره نشده باشد) از کاربر پرسیده
         می‌شود. رمز تازه‌واردشده بلافاصله رمزنگاری و ذخیره می‌شود تا در
         اجراهای بعدی پرسیده نشود (مگر این‌که کاربر ذخیره‌ی امن را خاموش
