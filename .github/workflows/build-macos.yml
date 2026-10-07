@@ -323,6 +323,14 @@ jobs:
           else
             files=("${zip[0]}")
             if [ -f "${dmg[0]}" ]; then files+=("${dmg[0]}"); fi
-            gh release create "$tag" "${files[@]}" --title "IAS Viewer $ver (macOS)" --notes "$notes" --prerelease
+            # (1.0.0) نسخه‌ی پایدار (بدون beta) نباید prerelease باشد.
+            # اگر ریلیز هم‌زمان توسط بیلد دیگری ساخته شد، فقط آپلود می‌کنیم.
+            _pre=""
+            case "$ver" in *beta*) _pre="--prerelease";; esac
+            if ! gh release create "$tag" "${files[@]}" --title "IAS Viewer $ver (macOS)" --notes "$notes" $_pre 2>/dev/null; then
+              sleep 5
+              gh release upload "$tag" "${zip[0]}" --clobber
+              if [ -f "${dmg[0]}" ]; then gh release upload "$tag" "${dmg[0]}" --clobber; fi
+            fi
           fi
           echo "OK: ${zip[0]} -> release $tag"
