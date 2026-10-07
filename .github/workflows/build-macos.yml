@@ -289,6 +289,9 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish update package to GitHub Release
+        # (1.0.0) continue-on-error: اگر انتشار ریلیز fail شد، بیلد قرمز نشود —
+        # فایل‌های بیلد (DMG/ZIP) در Artifacts موجودند.
+        continue-on-error: true
         # خودکار وقتی تگ mac-v* پوش می‌شود (مثل NerkhCheck)، یا با اجرای
         # دستی ورک‌فلو + تیک publish_release.
         # (1.0.0) انتشار خودکار: روی push به main هم Release ساخته می‌شود —
