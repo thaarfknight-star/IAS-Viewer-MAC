@@ -16,7 +16,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QListWidget, QListWidgetItem, QMessageBox,
     QGroupBox, QMenu, QTreeWidget, QTreeWidgetItem, QInputDialog, QDialog,
-    QGridLayout, QComboBox, QScrollArea, QSizePolicy, QSplitter, QStackedWidget
+    QGridLayout, QComboBox, QScrollArea, QSizePolicy, QSplitter, QStackedWidget,
+    QSlider
 )
 from PyQt6.QtGui import QImage, QPixmap, QAction, QIcon, QDrag, QFontMetrics, QPainter, QPen, QColor, QPolygonF
 from PyQt6.QtCore import Qt, QSize, QMimeData, QPointF, QRectF, QTimer, QEvent, pyqtSignal
@@ -603,8 +604,13 @@ class CameraSlotWidget(QWidget):
     def __init__(self, on_clicked, on_close_requested, on_double_clicked=None,
                  on_slot_drag_swap=None, on_camera_drag_drop=None, on_region_alert=None,
                  on_fire_event=None, on_plate_event=None, on_person_event=None,
+                 on_audio_url_found=None, on_audio_creds_save=None,
                  parent=None):
         super().__init__(parent)
+        # (2.0.106-beta) کال‌بک ذخیره‌ی مسیر صوتی موفق (cam_id, url)
+        self._on_audio_url_found_cb = on_audio_url_found
+        # (2.0.110-beta) کال‌بک ذخیره‌ی یوزر/پس جدید صدا (cam_id, user, pass)
+        self._on_audio_creds_save_cb = on_audio_creds_save
         self.cam = None
         self.stream_thread = None
         self.latest_raw_frame = None
@@ -781,6 +787,26 @@ class CameraSlotWidget(QWidget):
         header.addWidget(self.name_label, 1)
         header.addWidget(self.people_count_label)
         header.addWidget(self.net_label)
+        # (2.0.106-beta) دکمه‌ی صدا و اسلایدر ولوم روی کادر دوربین —
+        # بدون نیاز به راست‌کلیک و دیالوگ جدا.
+        self.audio_btn = QPushButton("🔊")
+        self.audio_btn.setFixedSize(18, 18)
+        self.audio_btn.setStyleSheet(_zoom_style)
+        self.audio_btn.setToolTip("شنیدن صدای دوربین")
+        self.audio_btn.setVisible(False)
+        self.audio_btn.clicked.connect(self._toggle_audio)
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(80)
+        self.volume_slider.setFixedWidth(60)
+        self.volume_slider.setToolTip("ولوم صدا")
+        self.volume_slider.setVisible(False)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        # نشست شنیدن صدا (بدون دیالوگ)
+        self._listen_session = None
+        self._on_audio_url_found = None
+        header.addWidget(self.audio_btn)
+        header.addWidget(self.volume_slider)
         header.addWidget(self.zoom_in_btn)
         header.addWidget(self.zoom_out_btn)
         header.addWidget(self.zoom_reset_btn)
@@ -1317,6 +1343,8 @@ class CameraSlotWidget(QWidget):
         else:
             self._set_name_text(cam_name)
         self.close_btn.setVisible(True)
+        # (2.0.106-beta) دکمه‌ی صدا با شروع پخش نمایش داده می‌شود.
+        self.audio_btn.setVisible(True)
         self.status_label.setText("در حال اتصال...")
         self.video_label.setText("در انتظار تصویر...")
         # (2.0.61-beta) ریست ردیاب قطع تصویر برای استریم جدید
@@ -1687,6 +1715,10 @@ class CameraSlotWidget(QWidget):
             self.stream_thread.stop()
         self.stream_thread = None
         self.cam = None
+        # (2.0.106-beta) توقف صدا و مخفی کردن دکمه/ولوم.
+        self._stop_audio()
+        self.audio_btn.setVisible(False)
+        self.volume_slider.setVisible(False)
         self.latest_raw_frame = None
         # (2.0.61-beta) ریست ردیاب قطع تصویر
         self._last_stream_state = ""
@@ -1711,6 +1743,192 @@ class CameraSlotWidget(QWidget):
         self.pending_points = None
         self.regions = []
         self._editing_region_id = None
+
+    # -- صدای دوربین روی کادر (2.0.106-beta) ---------------------------------
+    def _toggle_audio(self):
+        """روشن/خاموش کردن صدای دوربین بدون دیالوگ."""
+        if self._listen_session is not None:
+            self._stop_audio()
+            return
+        if not self.cam:
+            return
+        try:
+            from camera_audio import ListenSession
+            session = ListenSession()
+            # نمایش وضعیت/خطا روی همین کادر
+            try:
+                session.state_changed = self._on_audio_state
+                session.error_occurred = self._on_audio_error
+            except Exception:
+                pass
+            # ولوم اولیه از اسلایدر
+            try:
+                session.set_volume(self.volume_slider.value() / 100.0)
+            except Exception:
+                pass
+            cam = dict(self.cam)
+            ok = session.start(cam, on_url_found=self._on_audio_url_found)
+            if ok:
+                self._listen_session = session
+                self.audio_btn.setText("🎧")
+                self.audio_btn.setToolTip("قطع صدای دوربین")
+                self.volume_slider.setVisible(True)
+                self.status_label.setText("در حال اتصال صدا...")
+            else:
+                self.status_label.setText("خطا در شروع صدا")
+        except Exception as e:
+            try:
+                self.status_label.setText(f"خطای صدا: {e}"[:60])
+            except Exception:
+                pass
+
+    def _on_audio_state(self, state: str):
+        try:
+            if state == "playing":
+                self.status_label.setText("🔊 صدا وصل است")
+            elif state.startswith("connecting"):
+                self.status_label.setText("در حال اتصال صدا...")
+            elif state == "error":
+                pass  # خطا از _on_audio_error می‌آید
+        except Exception:
+            pass
+
+    def _on_audio_error(self, msg: str):
+        # (2.0.110-beta) اگر خطا احرازهویت باشد، مثل VLC پنجره‌ی
+        # یوزرنیم/پسورد باز می‌کنیم تا کاربر رمز درست را بدهد و دوباره
+        # تلاش می‌کنیم.
+        is_auth_error = False
+        try:
+            low = (msg or "").lower()
+            is_auth_error = ("احرازهویت" in (msg or "") or "401" in low
+                             or "unauthorized" in low)
+        except Exception:
+            pass
+        if is_auth_error and not getattr(self, "_audio_auth_asked", False):
+            self._audio_auth_asked = True
+            try:
+                self._stop_audio()
+            except Exception:
+                pass
+            creds = self._ask_audio_credentials()
+            # فلگ را ریست می‌کنیم تا دفعه‌ی بعد دوباره بپرسد
+            self._audio_auth_asked = False
+            if creds:
+                user, pwd = creds
+                try:
+                    if self.cam is not None:
+                        self.cam["user"] = user
+                        self.cam["pass"] = pwd
+                    # رمز جدید را در store هم ذخیره می‌کنیم تا دفعه‌ی بعد
+                    # لازم نباشد دوباره پرسیده شود.
+                    save_cb = getattr(self, "_on_audio_creds_save_cb", None)
+                    if save_cb and self.cam:
+                        try:
+                            save_cb(self.cam.get("id"), user, pwd)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    self.status_label.setText("تلاش مجدد با رمز جدید...")
+                except Exception:
+                    pass
+                self._toggle_audio()
+                return
+        try:
+            # فقط خط اول پیام را نشان می‌دهیم
+            line = (msg or "").split("\n")[0][:80]
+            self.status_label.setText(f"⚠ صدا: {line}")
+        except Exception:
+            pass
+        # نشست ناموفق را تمیز می‌کنیم تا دکمه به حالت اول برگردد
+        try:
+            self._stop_audio()
+        except Exception:
+            pass
+
+    def _ask_audio_credentials(self):
+        """دیالوگ یوزرنیم/پسورد به سبک VLC برای اتصال صدا.
+        خروجی: (user, password) یا None اگر انصراف."""
+        try:
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, \
+                QLabel, QLineEdit, QDialogButtonBox
+            from PyQt6.QtCore import Qt
+            cam_name = ""
+            try:
+                cam_name = (self.cam or {}).get("name", "")
+            except Exception:
+                pass
+            dlg = QDialog(self)
+            dlg.setWindowTitle("🔐 احرازهویت صدای دوربین")
+            dlg.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+            dlg.setMinimumWidth(320)
+            lay = QVBoxLayout(dlg)
+            lay.addWidget(QLabel(
+                f"برای اتصال به صدای «{cam_name}» نام کاربری و رمز را وارد کنید:"))
+            user_edit = QLineEdit()
+            user_edit.setPlaceholderText("نام کاربری")
+            try:
+                user_edit.setText((self.cam or {}).get("user", "") or "")
+            except Exception:
+                pass
+            pass_edit = QLineEdit()
+            pass_edit.setPlaceholderText("رمز عبور")
+            pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            lay.addWidget(QLabel("نام کاربری:"))
+            lay.addWidget(user_edit)
+            lay.addWidget(QLabel("رمز عبور:"))
+            lay.addWidget(pass_edit)
+            btns = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok |
+                QDialogButtonBox.StandardButton.Cancel)
+            btns.button(QDialogButtonBox.StandardButton.Ok).setText("اتصال")
+            btns.button(QDialogButtonBox.StandardButton.Cancel).setText("انصراف")
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            lay.addWidget(btns)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                return (user_edit.text().strip(), pass_edit.text())
+            return None
+        except Exception:
+            return None
+
+    def _stop_audio(self):
+        try:
+            if self._listen_session is not None:
+                self._listen_session.stop()
+        except Exception:
+            pass
+        self._listen_session = None
+        try:
+            self.audio_btn.setText("🔊")
+            self.audio_btn.setToolTip("شنیدن صدای دوربین")
+            self.volume_slider.setVisible(False)
+        except Exception:
+            pass
+
+    def _on_volume_changed(self, v: int):
+        if self._listen_session is not None:
+            try:
+                self._listen_session.set_volume(v / 100.0)
+            except Exception:
+                pass
+
+    def _on_audio_url_found(self, url: str):
+        """مسیر صوتی موفق پیدا شد — برای کش کردن به MainWindow اطلاع می‌دهیم."""
+        # (2.0.112-beta) خودِ self.cam را هم به‌روز می‌کنیم تا دفعه‌ی بعد
+        # کش استفاده شود (قبلاً فقط در store ذخیره می‌شد).
+        try:
+            if self.cam is not None:
+                self.cam["audio_url"] = url
+        except Exception:
+            pass
+        cb = getattr(self, "_on_audio_url_found_cb", None)
+        if cb and self.cam:
+            try:
+                cb(self.cam.get("id"), url)
+            except Exception:
+                pass
         self.video_label.set_pending_points_norm(None)
         self.video_label.set_confirmed_regions([])
         self.video_label.set_draw_mode(False)
@@ -1940,7 +2158,8 @@ class CameraGridWidget(QWidget):
 
     def __init__(self, face_engine: FaceEngine, on_face_event, on_external_camera_drop=None,
                  on_region_alert=None, on_fire_event=None, on_plate_event=None,
-                 on_person_event=None, parent=None):
+                 on_person_event=None, on_audio_url_found=None,
+                 on_audio_creds_save=None, parent=None):
         super().__init__(parent)
         self.face_engine = face_engine
         self.on_face_event = on_face_event
@@ -1963,6 +2182,10 @@ class CameraGridWidget(QWidget):
         # یک خانه رها (drop) شود، این callback (در MainWindow) صدا زده می‌شود
         # تا رمز عبور را در صورت نیاز بپرسد و آدرس RTSP را بسازد.
         self.on_external_camera_drop = on_external_camera_drop
+        # (2.0.106-beta) کال‌بک ذخیره‌ی مسیر صوتی موفق هر خانه.
+        self.on_audio_url_found = on_audio_url_found
+        # (2.0.110-beta) کال‌بک ذخیره‌ی یوزر/پس جدید صدا.
+        self.on_audio_creds_save = on_audio_creds_save
         self.slots = []
         self.selected_index = None
         # کادرهای دوربین «سیال»‌اند: اندازه‌ی هر کادر از چیدمان (QGridLayout)
@@ -2024,6 +2247,8 @@ class CameraGridWidget(QWidget):
                     on_fire_event=self.on_fire_event,
                     on_plate_event=self.on_plate_event,
                     on_person_event=self.on_person_event,
+                    on_audio_url_found=self.on_audio_url_found,
+                    on_audio_creds_save=self.on_audio_creds_save,
                 )
                 slot.slot_index = len(self.slots)
                 slot.tripwire_changed.connect(self.tripwire_changed.emit)
@@ -2376,6 +2601,13 @@ class MainWindow(QMainWindow):
             if not notice:
                 return
             clear_update_notice()
+            # (1.0.0) بعد از اعمال آپدیت، نسخه‌ی هشدار داده‌شده را پاک می‌کنیم
+            # تا آپدیت‌های بعدی دوباره هشدار بدهند.
+            try:
+                import app_settings
+                app_settings.set_notified_update_version("")
+            except Exception:
+                pass
             new_v = str(notice.get("new_version") or "")
             prev_v = str(notice.get("prev_version") or "")
             entries = changelog_between(prev_v, new_v) if new_v else []
@@ -2704,6 +2936,9 @@ class MainWindow(QMainWindow):
             on_fire_event=self.on_fire_event,
             on_plate_event=self.on_plate_event,
             on_person_event=self.on_person_event,
+            on_audio_url_found=lambda cam_id, url: self.camera_store.update_camera(
+                cam_id, audio_url=url),
+            on_audio_creds_save=self._save_audio_creds,
         )
         self.camera_grid.selection_changed.connect(lambda _idx: self._refresh_line_buttons())
         self.camera_grid.tripwire_changed.connect(self._refresh_line_buttons)
@@ -3739,12 +3974,30 @@ class MainWindow(QMainWindow):
                 self._auto_display_camera(cam)
             QMessageBox.information(self, "بازخوانی کامل شد", f"{len(added_cams)} کانال جدید اضافه شد.")
 
+    def _save_audio_creds(self, cam_id, user, pwd):
+        """(2.0.110-beta) ذخیره‌ی یوزر/پس جدیدی که کاربر برای صدا وارد کرد."""
+        try:
+            self.camera_store.update_camera(cam_id, **{"user": user, "pass": pwd})
+        except Exception:
+            pass
+
     def delete_nvr(self, nvr_id):
         confirm = QMessageBox.question(
             self, "تأیید حذف", "آیا از حذف این NVR و همه‌ی کانال‌های ثبت‌شده‌ی آن مطمئن هستید؟"
         )
         if confirm == QMessageBox.StandardButton.Yes:
+            # (2.0.105-beta) قبل از حذف، شناسه‌ی دوربین‌های این NVR را نگه
+            # می‌داریم تا خانه‌های لایوی که آن‌ها را نشان می‌دهند متوقف شوند.
+            cam_ids = {c.get("id") for c in
+                       self.camera_store.cameras_for_nvr(nvr_id)}
             self.camera_store.remove_nvr(nvr_id, cascade=True)
+            # توقف خانه‌های لایو که دوربین‌های حذف‌شده را نشان می‌دادند.
+            try:
+                for slot in self.camera_grid.slots:
+                    if slot.cam and slot.cam.get("id") in cam_ids:
+                        slot.stop()
+            except Exception:
+                pass
             self.reload_camera_list()
 
     def edit_nvr_playback_template(self, nvr_id):
@@ -4262,7 +4515,10 @@ class MainWindow(QMainWindow):
                 cam["_nvr_rtsp_port"] = nvr.get("rtsp_port") or 554
                 cam["_nvr_user"] = nvr.get("user", "")
                 cam["_nvr_pass"] = nvr.get("pass", "")
-        dlg = ListenDialog(cam, parent=self)
+        dlg = ListenDialog(
+            cam, parent=self,
+            on_url_found=lambda url: self.camera_store.update_camera(
+                cam_id, audio_url=url))
         dlg.exec()
 
     def _autodetect_ptz_async(self, cam_id):
@@ -4631,9 +4887,23 @@ class MainWindow(QMainWindow):
         if not info or not self._is_admin() or not self._auto_check_enabled():
             return
         ver = info.get("version", "")
-        if not ver or ver == self._update_notified_version:
+        if not ver:
+            return
+        # (1.0.0) جلوگیری از آلارم تکراری: نسخه‌ای که قبلاً هشدار داده شده
+        # (حتی بعد از ری‌استارت) دوباره هشدار نمی‌دهیم.
+        try:
+            import app_settings
+            _notified = app_settings.get_notified_update_version()
+        except Exception:
+            _notified = self._update_notified_version
+        if ver == self._update_notified_version or ver == _notified:
             return  # برای همین نسخه قبلاً هشدار داده‌ایم
         self._update_notified_version = ver
+        try:
+            import app_settings
+            app_settings.set_notified_update_version(ver)
+        except Exception:
+            pass
         self._pending_update_info = info
         self.header_update_btn.setVisible(True)
         self._show_update_toast(info)
@@ -4842,35 +5112,49 @@ class MainWindow(QMainWindow):
                     allowed_pages=allowed)
 
     def open_face_gallery(self):
-        """گالری «🖼 دیدن تصاویر» بالای پنل رویدادها: چهره‌های
-        تشخیص‌داده‌شده‌ی همین نشست (از حافظه) به‌صورت شبکه‌ای با تصویر
-        بزرگ‌تر؛ کلیک روی هر عکس → نمایش بزرگ."""
-        events = []
-        for ev in list(getattr(self, "_recent_face_events", []) or []):
-            pix = ev.get("pixmap")
+        """(2.0.111-beta) دکمه‌ی «🖼 دیدن تصاویر» پوشه‌ای را در اکسپلورر
+        باز می‌کند که برنامه تصاویر رویدادها (چهره‌ها، پلاک‌ها و...) را در آن
+        ذخیره می‌کند (report_images)."""
+        try:
+            import os
+            import sys
+            images_dir = report_store.IMAGES_DIR
+            os.makedirs(images_dir, exist_ok=True)
+            # در ویندوز os.startfile مطمئن‌ترین راه است.
+            if sys.platform == "win32":
+                try:
+                    os.startfile(images_dir)
+                    return
+                except Exception:
+                    pass
+            # در مک از دستور open استفاده می‌کنیم.
+            if sys.platform == "darwin":
+                try:
+                    import subprocess
+                    subprocess.Popen(["open", images_dir])
+                    return
+                except Exception:
+                    pass
+            # fallback: QDesktopServices
+            from PyQt6.QtCore import QUrl
+            from PyQt6.QtGui import QDesktopServices
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(images_dir)):
+                raise RuntimeError("openUrl ناموفق بود")
+        except Exception as e:
             try:
-                if pix is not None and not pix.isNull():
-                    pix = pix.scaled(320, 320,
-                                     Qt.AspectRatioMode.KeepAspectRatio,
-                                     Qt.TransformationMode.SmoothTransformation)
-                else:
-                    pix = None
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(
+                    self, "خطا",
+                    f"باز کردن پوشه‌ی تصاویر ناموفق بود:\n{images_dir}\n\n{e}")
             except Exception:
-                pix = None
-            events.append({
-                "pixmap": pix,
-                "camera": ev.get("camera", ""),
-                "time": ev.get("time", ""),
-                "name": ev.get("name", ""),
-                "known": bool(ev.get("known")),
-            })
-        DetectedFacesDialog(events, parent=self).exec()
+                pass
 
     def on_face_event(self, cam, person, crop_frame):
         """برای هر چهره‌ای که هر یک از دوربین‌ها ببیند (شناخته‌شده یا
-        تعریف‌نشده) فراخوانی می‌شود. (2.0.56-beta) چهره‌ها دیگر در «پنل
-        رویدادها» نمایش داده نمی‌شوند؛ فقط برای گالری «دیدن تصاویر» در
-        حافظه نگه داشته و مثل قبل به‌صورت دائمی در گزارش‌ها ثبت می‌شوند.
+        تعریف‌نشده) فراخوانی می‌شود. (2.0.105-beta) چهره‌ها دوباره در «پنل
+        رویدادها» نمایش داده می‌شوند (با تصویر بندانگشتی)؛ همچنین برای گالری
+        «دیدن تصاویر» در حافظه نگه داشته و مثل قبل به‌صورت دائمی در گزارش‌ها
+        ثبت می‌شوند.
         ``cam``: کل دیکشنری دوربین (نه فقط اسم) تا nvr_id/channel هم
         برای لینک «پخش ویدیوی NVR» در دیالوگ گزارش‌ها ذخیره شود."""
         # گیت لایسنس: اگر قابلیت چهره‌خوان فعال نباشد، چهره‌ای شناسایی
@@ -4900,6 +5184,23 @@ class MainWindow(QMainWindow):
         # (report_store.py).
         report_store.log_face_event(camera_name, person, crop_frame,
                                      nvr_id=cam.get("nvr_id"), channel=cam.get("channel"))
+
+        # (2.0.105-beta) نمایش در «پنل رویدادها» با تصویر بندانگشتی.
+        try:
+            name = person.get("name", "") if person else ""
+            if name:
+                text = f"[{timestamp}] {camera_name}\n👤 {name}"
+            else:
+                text = f"[{timestamp}] {camera_name}\n❓ چهره ناشناس"
+            item = QListWidgetItem(text)
+            if pixmap is not None and not pixmap.isNull():
+                item.setIcon(QIcon(pixmap))
+            self.events_panel_list.insertItem(0, item)
+            while self.events_panel_list.count() > 300:
+                self.events_panel_list.takeItem(
+                    self.events_panel_list.count() - 1)
+        except Exception:
+            pass
 
     # ------------------------------------------------------ plate reader ---
 

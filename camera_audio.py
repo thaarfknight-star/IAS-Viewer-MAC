@@ -282,12 +282,26 @@ class RTSPAudioClient:
         url_pwd = unquote(parsed.password or "")
         self.username = url_user or username or ""
         self.password = url_pwd or password or ""
+        # (2.0.121-beta) مثل VLC: اگر credential داریم، از همان درخواست اول
+        # هدر Basic را preemptive می‌فرستیم (بعضی دوربین‌ها بدون 401 قبول
+        # می‌کنند). اگر سرور Digest خواست، در _request جایگزین می‌شود.
+        if self.username:
+            try:
+                import base64 as _b64
+                _pre = _b64.b64encode(
+                    f"{self.username}:{self.password}".encode("utf-8")
+                ).decode("ascii")
+                self._auth_header = f"Basic {_pre}"
+            except Exception:
+                self._auth_header = ""
+        else:
+            self._auth_header = ""
         self.timeout = timeout
         self.sock = None
         self.cseq = 0
         self._rx_buf = b""  # بایت‌های اضافی خوانده‌شده از سوکت (بعد از هدرها)
         self.session_id = ""
-        self._auth_header = ""
+        # (نکته: self._auth_header بالاتر ست شده — preemptive Basic اگر یوزر هست)
         self.audio = None  # dict ترک صوتی پس از connect
         self._mode = "tcp"  # یا "udp" پس از fallback
         self._rtp_channel = 0
@@ -370,6 +384,12 @@ class RTSPAudioClient:
                  body: bytes = b"", _auth_tries: int = 0) -> tuple:
         self.cseq += 1
         target = url or self.url
+        # (2.0.117-beta) لاگ یوزرنیم برای عیب‌یابی (فقط طول، نه مقدار)
+        if _auth_tries == 0 and self.username:
+            try:
+                self._log(f"{method} -> یوزر: {self.username[:2]}*** (طول {len(self.username)}), پسورد طول {len(self.password or '')}")
+            except Exception:
+                pass
         lines = [f"{method} {target} RTSP/1.0", f"CSeq: {self.cseq}"]
         # بعضی فریمورها (مثل XM) به User-Agent حساس‌اند و کلاینت ناشناس را
         # با ۴۶۱ رد می‌کنند؛ مسیر ویدیوی اصلی برنامه با FFmpeg/Lavf روی همین
@@ -403,20 +423,57 @@ class RTSPAudioClient:
             # می‌دهند — با چلنج جدید دوباره می‌سازیم.
             www = resp_headers.get("www-authenticate", "")
             if "digest" in www.lower():
+                # (2.0.115-beta) لاگ چلنج برای عیب‌یابی (بدون رمز)
+                try:
+                    _chal_log = www[:200].replace("\r", " ").replace("\n", " ")
+                    self._log(f"{method} -> چلنج: {_chal_log}")
+                except Exception:
+                    pass
                 challenge = _parse_challenge(www)
                 # اگر credential داخل URL بود، از uri دایجست حذفش می‌کنیم
                 # (سرورها userinfo را در uri دایجست قبول ندارند)
                 digest_target = self._strip_userinfo(target)
-                new_auth = build_digest_auth(
-                    self.username, self.password, method, digest_target,
-                    challenge)
-                if new_auth != self._auth_header:
-                    self._auth_header = new_auth
-                    return self._request(method, url, headers, body,
-                                         _auth_tries + 1)
+                # (2.0.114-beta) بعضی دوربین‌ها (مثل Sunell) در uri دایجست
+                # فقط path را قبول می‌کنند نه URL کامل (VLC همین کار را
+                # می‌کند). از همان تلاش دوم، هر دو حالت را امتحان می‌کنیم:
+                # اول path-only، بعد URL کامل.
+                candidates = []
+                try:
+                    from urllib.parse import urlparse as _up
+                    _p = _up(digest_target)
+                    _path_only = (_p.path or "/") + (
+                        ("?" + _p.query) if _p.query else "")
+                    if _path_only != digest_target:
+                        candidates.append(_path_only)
+                except Exception:
+                    pass
+                candidates.append(digest_target)
+                for _cand in candidates:
+                    new_auth = build_digest_auth(
+                        self.username, self.password, method, _cand,
+                        challenge)
+                    if new_auth != self._auth_header:
+                        self._auth_header = new_auth
+                        if _cand != digest_target:
+                            self._log(f"{method} -> دایجست با path-only")
+                        return self._request(method, url, headers, body,
+                                             _auth_tries + 1)
                 raise RTSPError(
                     "احرازهویت دوربین رد شد (نام کاربری/رمز را بررسی کنید)")
-            raise RTSPError("دوربین احرازهویت Basic می‌خواهد (پشتیبانی نمی‌شود)")
+            # (2.0.116-beta) پشتیبانی از Basic auth — بعضی دوربین‌ها با
+            # Basic راحت‌ترند و VLC هم از آن استفاده می‌کند.
+            if "basic" in www.lower() and self.username:
+                import base64 as _b64
+                _basic = _b64.b64encode(
+                    f"{self.username}:{self.password}".encode("utf-8")
+                ).decode("ascii")
+                _basic_auth = f"Basic {_basic}"
+                if _basic_auth != self._auth_header:
+                    self._auth_header = _basic_auth
+                    self._log(f"{method} -> تلاش با Basic auth")
+                    return self._request(method, url, headers, body,
+                                         _auth_tries + 1)
+            raise RTSPError("احرازهویت دوربین رد شد (نام کاربری/رمز را بررسی کنید)")
         return code, resp_headers, resp_body
 
     # -- handshake ----------------------------------------------------------
@@ -1057,12 +1114,47 @@ def build_listen_url(cam) -> str:
     from camera_store import CameraStore
     url = CameraStore.build_rtsp_url(cam)
     parsed = urlparse(url)
-    path = parsed.path or "/"
+    path = _clean_path(parsed.path or "/")
     if parsed.query:
         path += "?" + parsed.query
     host = parsed.hostname or (cam.get("camera_ip") or cam.get("ip") or "")
     port = parsed.port or int(cam.get("port") or 554)
     return f"rtsp://{host}:{port}{path}"
+
+
+def build_direct_url_variants(cam):
+    """آدرس‌های جایگزین مستقیم دوربین (فرمت‌های مختلف سازندگان).
+
+    دوربین‌های Sunell (مثل IAS.NB-Q2501F) از فرمت /snl/live/<ch>/<stream>
+    استفاده می‌کنند که صدا را هم می‌فرستد؛ فرمت XM (/h264/...) فقط ویدیو می‌دهد.
+    (2.0.112-beta) اگر path اشتباهاً URL کامل باشد، فقط path را جدا می‌کنیم.
+    """
+    ip = cam.get("camera_ip") or cam.get("ip") or ""
+    port = int(cam.get("port") or 554)
+    ch = int(cam.get("channel") or 1)
+    base = f"rtsp://{ip}:{port}"
+    return [
+        f"{base}/snl/live/{ch}/1",   # Sunell main
+        f"{base}/snl/live/{ch}/2",   # Sunell sub1
+        f"{base}/snl/live/{ch}/3",   # Sunell sub2
+    ]
+
+
+def _clean_path(path: str) -> str:
+    """اگر path اشتباهاً URL کامل باشد (مثل rtsp://ip:port/path)، فقط
+    path را برمی‌گرداند. (2.0.112-beta)"""
+    if not path:
+        return "/"
+    p = path.strip()
+    if "://" in p:
+        try:
+            from urllib.parse import urlparse as _up
+            parsed = _up(p)
+            q = ("?" + parsed.query) if parsed.query else ""
+            return (parsed.path or "/") + q
+        except Exception:
+            pass
+    return p if p.startswith("/") else "/" + p
 
 
 def build_nvr_proxy_listen_url(cam):
@@ -1160,6 +1252,7 @@ class ListenSession:
             pcm_ready = pyqtSignal(bytes)
             failed = pyqtSignal(str)
             connected = pyqtSignal(dict)
+            audio_confirmed = pyqtSignal(str)  # URL موفق (بعد از اولین بسته صوتی)
 
             def __init__(self, url_items, user, pwd):
                 super().__init__()
@@ -1173,6 +1266,7 @@ class ListenSession:
                 self._stop = False
                 self._client = None
                 self._info = None
+                self._connected_url = None
 
             def request_stop(self):
                 self._stop = True
@@ -1237,14 +1331,35 @@ class ListenSession:
             def run(self):
                 # چند آدرس را به‌ترتیب امتحان می‌کنیم (مثلاً اول پروکسی NVR
                 # بعد مستقیم)؛ لاگ عیب‌یابی همه‌ی تلاش‌ها ذخیره می‌شود.
+                # (2.0.109-beta) اگر آدرسی وصل شد ولی بسته‌ی صوتی نرسید،
+                # می‌رویم سراغ آدرس بعدی (قبلاً کلاً بی‌خیال می‌شد).
                 try:
                     last_err, last_client = None, None
                     info = None
+                    client = None
                     all_debug = []  # (url, debug_lines) همه‌ی تلاش‌ها برای لاگ
+                    first = None
                     for url, timeout in self._url_items:
                         if self._stop:
                             return
-                        client = RTSPAudioClient(url, self._user, self._pwd,
+                        # (2.0.119-beta) مثل VLC: credential را داخل خود URL
+                        # می‌گذاریم (encode شده). بعضی دوربین‌ها با این روش
+                        # بهتر کار می‌کنند تا user/pwd جداگانه.
+                        _use_url = url
+                        try:
+                            if self._user and "@" not in url.split("://", 1)[-1].split("/", 1)[0]:
+                                from urllib.parse import quote as _q, urlparse as _up
+                                _p = _up(url)
+                                _cred = f"{_q(self._user, safe='')}:{_q(self._pwd or '', safe='')}@"
+                                _netloc = _cred + (_p.hostname or "")
+                                if _p.port:
+                                    _netloc += f":{_p.port}"
+                                _use_url = f"{_p.scheme}://{_netloc}{_p.path or '/'}"
+                                if _p.query:
+                                    _use_url += "?" + _p.query
+                        except Exception:
+                            _use_url = url
+                        client = RTSPAudioClient(_use_url, self._user, self._pwd,
                                                  debug=True, timeout=timeout)
                         self._client = client
                         last_client = client
@@ -1255,17 +1370,53 @@ class ListenSession:
                             if self.state_changed else None)
                         try:
                             info = client.connect()
-                            last_err = None
-                            all_debug.append((url, list(client._debug or [])))
-                            break
                         except RTSPError as e:
                             last_err = e
                             all_debug.append((url, list(client._debug or [])))
                             # آدرس بعدی را امتحان می‌کنیم
+                            try:
+                                client.close()
+                            except Exception:
+                                pass
                             continue
-                    if last_err is not None:
+                        # وصل شد — حالا منتظر اولین بسته‌ی صوتی واقعی می‌مانیم
+                        # (نه فقط اتصال RTSP)
+                        last_err = None
+                        all_debug.append((url, list(client._debug or [])))
+                        self._connected_url = url
+                        self.connected.emit(info)
+                        self._info = info
+                        deadline = time.time() + 4.0
+                        first = None
+                        fail_msg = None
+                        while not self._stop and time.time() < deadline:
+                            try:
+                                first = client.read_audio_frame(
+                                    timeout=max(0.5, deadline - time.time()))
+                                break
+                            except RTSPError as e:
+                                fail_msg = str(e)
+                                break
+                            except OSError:
+                                continue  # timeout خواندن — هنوز منتظر می‌مانیم
+                            except Exception as e:  # noqa: BLE001
+                                fail_msg = f"خطا در دریافت صدا: {e}"[:100]
+                                break
+                        if first is not None:
+                            # صدا آمد! از حلقه‌ی آدرس‌ها خارج می‌شویم.
+                            break
+                        # صدا نیامد — این آدرس را می‌بندیم و سراغ بعدی می‌رویم
+                        last_err = RTSPError(fail_msg or "no_audio_data")
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+                        continue
+                    # پایان حلقه‌ی آدرس‌ها
+                    if first is None:
+                        # هیچ آدرسی صدا نداد
                         path = self._write_debug_log(last_client, all_debug)
-                        msg = str(last_err)
+                        msg = str(last_err) if last_err else "no_audio_data"
                         if path:
                             msg += f"\nلاگ عیب‌یابی: {path}"
                         self.failed.emit(msg)
@@ -1273,42 +1424,24 @@ class ListenSession:
                 except Exception as e:  # noqa: BLE001
                     self.failed.emit(f"خطای اتصال: {e}"[:120])
                     return
-                self.connected.emit(info)
-                self._info = info
-                # انتظار برای اولین بسته‌ی صوتی واقعی (نه فقط اتصال RTSP)
-                deadline = time.time() + 6.0
-                first = None
-                fail_msg = None
-                while not self._stop and time.time() < deadline:
-                    try:
-                        first = client.read_audio_frame(
-                            timeout=max(0.5, deadline - time.time()))
-                        break
-                    except RTSPError as e:
-                        fail_msg = str(e)
-                        break
-                    except OSError:
-                        continue  # timeout خواندن — هنوز منتظر می‌مانیم
-                    except Exception as e:  # noqa: BLE001
-                        fail_msg = f"خطا در دریافت صدا: {e}"[:100]
-                        break
-                if first is None and not self._stop:
-                    path = self._write_debug_log(client, all_debug)
-                    msg = fail_msg or "no_audio_data"
-                    if path:
-                        msg += f"\nلاگ عیب‌یابی: {path}"
-                    self.failed.emit(msg)
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
-                    return
                 if self._stop:
                     try:
                         client.close()
                     except Exception:
                         pass
                     return
+                # صدا تأیید شد — URL موفق را اعلام می‌کنیم تا کش شود
+                if self._connected_url:
+                    try:
+                        self.audio_confirmed.emit(self._connected_url)
+                    except Exception:
+                        pass
+                # صدا تأیید شد — URL موفق را اعلام می‌کنیم تا کش شود
+                if self._connected_url:
+                    try:
+                        self.audio_confirmed.emit(self._connected_url)
+                    except Exception:
+                        pass
                 self._emit_first(first)
                 while not self._stop:
                     try:
@@ -1403,13 +1536,17 @@ class ListenSession:
         self._io = self._sink.start()
         return True
 
-    def start(self, cam: dict) -> bool:
-        """شروع اتصال و پخش (غیربلاکینگ)."""
+    def start(self, cam: dict, on_url_found=None) -> bool:
+        """شروع اتصال و پخش (غیربلاکینگ).
+        on_url_found: کال‌بک اختیاری (url) که وقتی مسیر صوتی موفق پیدا و
+        تأیید شد صدا می‌شود — برای کش کردن مسیر در camera_store."""
         if self._worker:
             return False
         if not self._open_output():
             return False
         self._emit_state("connecting")
+        self._on_url_found = on_url_found
+        self._cam_id = cam.get("id")
         url = build_listen_url(cam)
         # لاگ تشخیصی: ببینیم کانال NVR چه فیلدهایی دارد
         nvr_urls = build_nvr_proxy_listen_url(cam)
@@ -1434,17 +1571,35 @@ class ListenSession:
                 _f.write(f"nvr proxy urls={_masked}\n")
         except Exception:
             pass
-        # اگر کانال NVR با URL مستقیم دوربین ثبت شده، اول کاندیداهای پروکسی
-        # NVR را امتحان می‌کنیم (تایم‌اوت کوتاه ۴ ثانیه، فقط probe) و بعد
-        # آدرس مستقیم را به‌عنوان fallback
-        url_items = [(u, 4.0) for u in nvr_urls] + [(url, 8.0)]
+        # (2.0.106-beta) اگر مسیر صوتی موفق قبلاً کش شده، اول همان را
+        # امتحان می‌کنیم (سریع)؛ بعد بقیه‌ی کاندیداها.
+        # ترتیب: کش‌شده (۲ثانیه) ← پروکسی NVR (۲ثانیه) ← مستقیم (۴ثانیه) ←
+        # فرمت‌های جایگزین Sunell (۳ثانیه)
+        url_items = []
+        cached = (cam.get("audio_url") or "").strip()
+        if cached:
+            url_items.append((cached, 2.0))
+        sunell_urls = build_direct_url_variants(cam)
+        url_items += ([(u, 2.0) for u in nvr_urls] + [(url, 4.0)] +
+                      [(u, 3.0) for u in sunell_urls
+                       if u != cached and u != url])
         self._worker = self._Worker(url_items, cam.get("user", "") or "",
                                    cam.get("pass", "") or "")
         self._worker.pcm_ready.connect(self._on_pcm)
         self._worker.connected.connect(self._on_worker_connected)
+        self._worker.audio_confirmed.connect(self._on_audio_confirmed)
         self._worker.failed.connect(self._on_worker_failed)
         self._worker.start()
         return True
+
+    def _on_audio_confirmed(self, url: str):
+        """مسیر صوتی موفق پیدا شد — برای کش کردن به کال‌بک اطلاع می‌دهیم."""
+        cb = getattr(self, "_on_url_found", None)
+        if cb:
+            try:
+                cb(url)
+            except Exception:
+                pass
 
     def set_volume(self, v: float):
         self._volume = max(0.0, min(1.0, v))

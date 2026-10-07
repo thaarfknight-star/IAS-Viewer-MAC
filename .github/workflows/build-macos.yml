@@ -26,7 +26,7 @@ on:
       publish_release:
         description: 'انتشار فایل آپدیت در GitHub Release (تگ mac-vX.Y.Z)'
         type: boolean
-        default: false
+        default: true
 
 env:
   APP_NAME: IAS Viewer
@@ -291,8 +291,10 @@ jobs:
       - name: Publish update package to GitHub Release
         # خودکار وقتی تگ mac-v* پوش می‌شود (مثل NerkhCheck)، یا با اجرای
         # دستی ورک‌فلو + تیک publish_release.
+        # (1.0.0) انتشار خودکار: روی push به main هم Release ساخته می‌شود —
+        # دیگر لازم نیست تیک publish_release را دستی بزنید.
         # تگ مک «mac-vX.Y.Z-beta» است (جدا از تگ ویندوز).
-        if: ${{ startsWith(github.ref, 'refs/tags/mac-v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/mac-v') || github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true') }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
