@@ -5,6 +5,8 @@
 #   - IAS Viewer.app  (باندل PyInstaller، حالت windowed/onedir)
 #   - IAS-Viewer-MAC-Update-vX.Y.Z.zip  (فایل آپدیت تفاضلی برای آپدیتر داخل برنامه)
 #   - IAS-Viewer-MAC-vX.Y.Z.dmg  (بسته‌ی نصب)
+#   - IAS-Viewer-MAC-source-vX.Y.Z.zip  (آرشیو سورس همان نسخه — تعهد «Corresponding Source» در AGPL-3.0)
+#   - THIRD_PARTY_NOTICES  (نام/نسخه/لایسنس/لینک سورس کامپوننت‌های ثالث — تعهد «notices»)
 #
 # انتشار در GitHub Release: خودکار وقتی تگ mac-v* پوش می‌شود
 # (مثل NerkhCheck)، یا با اجرای دستی ورک‌فلو + تیک publish_release؛
@@ -249,6 +251,96 @@ jobs:
             -ov -format UDZO "dist/IAS-Viewer-MAC-v$APP_VERSION.dmg"
           ls -la dist/*.dmg
 
+      - name: Package source archive (AGPL Corresponding Source)
+        # (1.0.0) تعهد «Corresponding Source» لایسنس AGPL-3.0: آرشیو سورس
+        # دقیقاً همان کامیتی که این بیلد را ساخته — ضمیمه‌ی هر ریلیز می‌شود.
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=zip --prefix=IAS-Viewer-MAC/ \
+            -o "dist/IAS-Viewer-MAC-source-v$APP_VERSION.zip" HEAD
+          ls -la dist/IAS-Viewer-MAC-source-*.zip
+
+      - name: Generate THIRD_PARTY_NOTICES
+        # (1.0.0) تعهد «notices» لایسنس‌های GPL/AGPL: نام کامپوننت، نسخه‌ی
+        # نصب‌شده در همین بیلد، لایسنس و لینک سورس — ضمیمه‌ی هر ریلیز.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYEOF'
+          import importlib.metadata as md
+          import os
+
+          KNOWN = {
+              "pyqt6": ("GPL-3.0", "https://www.riverbankcomputing.com/software/pyqt/"),
+              "pyqt6_webengine": ("GPL-3.0", "https://www.riverbankcomputing.com/software/pyqtwebengine/"),
+              "pyqt6_qt6": ("LGPL-3.0", "https://www.qt.io/"),
+              "pyqt6_sip": ("GPL-3.0", "https://www.riverbankcomputing.com/software/sip/"),
+              "opencv_python": ("Apache-2.0", "https://github.com/opencv/opencv-python"),
+              "face_recognition": ("MIT", "https://github.com/ageitgey/face_recognition"),
+              "face_recognition_models": ("CC-BY-4.0", "https://github.com/ageitgey/face_recognition_models"),
+              "numpy": ("BSD-3-Clause", "https://github.com/numpy/numpy"),
+              "requests": ("Apache-2.0", "https://github.com/psf/requests"),
+              "pymodbus": ("BSD-3-Clause", "https://github.com/riptideio/pymodbus"),
+              "onvif_zeep": ("MIT", "https://github.com/FalkTannhaeuser/python-onvif-zeep"),
+              "ultralytics": ("AGPL-3.0", "https://github.com/ultralytics/ultralytics"),
+              "transformers": ("Apache-2.0", "https://github.com/huggingface/transformers"),
+              "pypdf": ("BSD-3-Clause", "https://github.com/py-pdf/pypdf"),
+              "torch": ("BSD-3-Clause", "https://github.com/pytorch/pytorch"),
+              "torchvision": ("BSD-3-Clause", "https://github.com/pytorch/vision"),
+              "pyinstaller": ("GPL-2.0 with bootloader exception",
+                              "https://github.com/pyinstaller/pyinstaller"),
+          }
+
+          def norm(n):
+              return n.lower().replace("-", "_").replace(".", "_")
+
+          rows, seen = [], set()
+          for dist in md.distributions():
+              name = dist.metadata["Name"] or ""
+              key = norm(name)
+              if key in KNOWN and key not in seen:
+                  seen.add(key)
+                  lic, url = KNOWN[key]
+                  rows.append((name, dist.version, lic, url))
+
+          # وزن‌های مدل باندل‌شده داخل DMG (دانلود در CI)
+          rows += [
+              ("yolov8n.pt (Ultralytics YOLOv8n weights)", "v8.3.0", "AGPL-3.0",
+               "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt"),
+              ("fire_smoke.pt (best_shreya_v2 — fire/smoke detection)", "best_shreya_v2", "MIT",
+               "https://github.com/shreyaa4567/industrial-smoke-and-fire-detection"),
+              ("segformer_floor_model (nvidia/segformer-b0-finetuned-ade-512-512)",
+               "b0-ade-512-512", "Apache-2.0",
+               "https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512"),
+          ]
+          rows.sort(key=lambda r: r[0].lower())
+
+          ver = os.environ["APP_VERSION"]
+          lines = [
+              "THIRD_PARTY_NOTICES",
+              "===================",
+              "",
+              f"IAS Viewer {ver} (macOS) — Copyright (C) 2026 Taha Arefi.",
+              "This program is free software licensed under the GNU Affero General Public",
+              "License v3.0 — see the LICENSE file and",
+              "https://github.com/thaarfknight-star/IAS-Viewer-MAC.",
+              "",
+              "Third-party components bundled with this release:",
+              "",
+          ]
+          for name, version, lic, url in rows:
+              lines += [f"- {name}",
+                        f"  version: {version}",
+                        f"  license: {lic}",
+                        f"  source:  {url}",
+                        ""]
+          with open("dist/THIRD_PARTY_NOTICES", "w", encoding="utf-8") as fh:
+              fh.write("\n".join(lines))
+          print(f"THIRD_PARTY_NOTICES written: {len(rows)} components")
+          PYEOF
+          ls -la dist/THIRD_PARTY_NOTICES
+
       - name: Smoke test (offscreen import)
         # فقط import سبک ماژول‌های پلتفرم؛ اجرای کامل GUI روی رانر لازم نیست.
         shell: bash
@@ -313,19 +405,28 @@ jobs:
           zip=(dist/IAS-Viewer-MAC-Update-v"$ver".zip)
           test -f "${zip[0]}" || { echo "FAIL: update zip not found"; exit 1; }
           dmg=(dist/IAS-Viewer-MAC-v"$ver".dmg)
+          # (1.0.0) AGPL-3.0: آرشیو سورس همان نسخه + THIRD_PARTY_NOTICES ضمیمه‌ی هر ریلیز.
+          srczip=(dist/IAS-Viewer-MAC-source-v"$ver".zip)
+          notices="dist/THIRD_PARTY_NOTICES"
           notes="IAS Viewer $ver — نسخه‌ی مک (macOS)."
           m="$(grep -m1 -F "**نسخه‌ی $ver" README.md || true)"
           if [ -n "$m" ]; then notes="$m"; fi
           notes="$notes
 
           نصب: فایل DMG را باز کنید و IAS Viewer را به Applications بکشید.
-          اولین اجرا: چون برنامه امضا نشده، روی IAS Viewer راست‌کلیک ← Open کنید."
+          اولین اجرا: چون برنامه امضا نشده، روی IAS Viewer راست‌کلیک ← Open کنید.
+
+          لایسنس: GNU AGPL v3.0 — فایل LICENSE در ریپو. سورس‌کد این نسخه و THIRD_PARTY_NOTICES ضمیمه‌ی همین ریلیز است."
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "${zip[0]}" --clobber
             if [ -f "${dmg[0]}" ]; then gh release upload "$tag" "${dmg[0]}" --clobber; fi
+            if [ -f "${srczip[0]}" ]; then gh release upload "$tag" "${srczip[0]}" --clobber; fi
+            if [ -f "$notices" ]; then gh release upload "$tag" "$notices" --clobber; fi
           else
             files=("${zip[0]}")
             if [ -f "${dmg[0]}" ]; then files+=("${dmg[0]}"); fi
+            if [ -f "${srczip[0]}" ]; then files+=("${srczip[0]}"); fi
+            if [ -f "$notices" ]; then files+=("$notices"); fi
             # (1.0.0) نسخه‌ی پایدار (بدون beta) نباید prerelease باشد.
             # اگر ریلیز هم‌زمان توسط بیلد دیگری ساخته شد، فقط آپلود می‌کنیم.
             _pre=""
@@ -334,6 +435,8 @@ jobs:
               sleep 5
               gh release upload "$tag" "${zip[0]}" --clobber
               if [ -f "${dmg[0]}" ]; then gh release upload "$tag" "${dmg[0]}" --clobber; fi
+              if [ -f "${srczip[0]}" ]; then gh release upload "$tag" "${srczip[0]}" --clobber; fi
+              if [ -f "$notices" ]; then gh release upload "$tag" "$notices" --clobber; fi
             fi
           fi
           echo "OK: ${zip[0]} -> release $tag"

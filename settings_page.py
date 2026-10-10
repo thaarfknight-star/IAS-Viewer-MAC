@@ -22,6 +22,28 @@ import app_settings
 from theme import apply_theme
 
 
+# (1.0.0) اطلاعیه‌ی لایسنس اوپن‌سورس — نمایش در بخش «درباره‌ی برنامه»ی صفحه‌ی تنظیمات.
+ABOUT_LICENSE_NOTICE = (
+    "«IAS Viewer» — نسخه‌ی MAC\n"
+    "Copyright (C) 2026 Taha Arefi (طه عارفی)\n"
+    "\n"
+    "این برنامه نرم‌افزار آزاد است: شما می‌توانید آن را تحت شرایط\n"
+    "«GNU Affero General Public License» نسخه‌ی ۳ (یا هر نسخه‌ی جدیدتر،\n"
+    "به انتخاب شما) بازتوزیع و/یا اصلاح کنید.\n"
+    "متن کامل لایسنس: فایل LICENSE در ریپوی گیت‌هاب + https://www.gnu.org/licenses/agpl-3.0.html\n"
+    "سورس‌کد: https://github.com/thaarfknight-star/IAS-Viewer-MAC\n"
+    "\n"
+    "---\n"
+    "\n"
+    "IAS Viewer (MAC) — Copyright (C) 2026 Taha Arefi\n"
+    "This program is free software: you can redistribute it and/or modify\n"
+    "it under the terms of the GNU Affero General Public License as published\n"
+    "by the Free Software Foundation, either version 3 of the License, or\n"
+    "(at your option) any later version.\n"
+    "Full text: LICENSE file in the GitHub repo — https://www.gnu.org/licenses/agpl-3.0.html"
+)
+
+
 
 
 class SettingsPage(QWidget):
@@ -89,6 +111,8 @@ class SettingsPage(QWidget):
         layout.addWidget(self._build_bandwidth_group())
         layout.addWidget(self._build_update_group())
         layout.addWidget(self._build_uninstall_group())
+        # (1.0.0) درباره‌ی برنامه + اطلاعیه‌ی لایسنس AGPL-3.0
+        layout.addWidget(self._build_about_group())
 
         layout.addStretch()
 
@@ -473,6 +497,19 @@ class SettingsPage(QWidget):
         nlay.addLayout(nrow)
         un_group.setLayout(nlay)
         return un_group
+
+    def _build_about_group(self):
+        # (1.0.0) درباره‌ی برنامه — اطلاعیه‌ی لایسنس اوپن‌سورس (AGPL-3.0).
+        about_group = QGroupBox("ℹ️ درباره‌ی برنامه")
+        alay = QVBoxLayout()
+        alay.setSpacing(12)
+        anotic = QLabel(ABOUT_LICENSE_NOTICE)
+        anotic.setWordWrap(True)
+        anotic.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        anotic.setOpenExternalLinks(True)
+        alay.addWidget(anotic)
+        about_group.setLayout(alay)
+        return about_group
 
     def _on_theme_changed(self, index):
         mode = self.theme_combo.itemData(index)
